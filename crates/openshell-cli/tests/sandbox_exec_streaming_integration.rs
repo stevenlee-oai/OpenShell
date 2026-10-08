@@ -251,6 +251,7 @@ mock_gateway! {
         update_provider_profiles(proto::UpdateProviderProfilesRequest) -> proto::UpdateProviderProfilesResponse;
         lint_provider_profiles(proto::LintProviderProfilesRequest) -> proto::LintProviderProfilesResponse;
         update_provider(proto::UpdateProviderRequest) -> proto::ProviderResponse;
+        resolve_provider_credential(proto::ResolveProviderCredentialRequest) -> proto::ResolveProviderCredentialResponse;
         get_provider_refresh_status(proto::GetProviderRefreshStatusRequest) -> proto::GetProviderRefreshStatusResponse;
         configure_provider_refresh(proto::ConfigureProviderRefreshRequest) -> proto::ConfigureProviderRefreshResponse;
         rotate_provider_credential(proto::RotateProviderCredentialRequest) -> proto::RotateProviderCredentialResponse;

@@ -201,6 +201,24 @@ openshell provider update my-graph \
 
 Use `0` as the timestamp to clear expiry for a credential key.
 
+### Read a Credential from the API
+
+Trusted control-plane integrations can call `ResolveProviderCredential` to read one current provider credential. Supply a named `workspace_scope`, the provider's canonical `name`, and its `credential_key`:
+
+```json
+{
+  "workspace_scope": { "workspace": "default" },
+  "name": "my-graph",
+  "credential_key": "MS_GRAPH_ACCESS_TOKEN"
+}
+```
+
+The RPC uses the gateway's bearer authorization policy and requires workspace admin membership or platform admin access. When [scope enforcement](/how-it-works/gateways/authentication#oidc) is enabled, the caller also needs `provider:credentials:read` or `openshell:all`. The `provider:read` scope is insufficient.
+
+The response contains the plaintext `value` and an optional `expiration_time`. Use it transiently in trusted server code; do not log or persist the response. The operation reads only the selected current credential, never backend storage handles or separately stored refresh material. `GetProvider` and `ListProviders` continue to redact credential values.
+
+This is a read of already-stored credentials. It does not initiate refresh or a token exchange. Missing providers or keys fail with `NOT_FOUND`; empty or expired values fail with `FAILED_PRECONDITION`. If the credential backend cannot resolve the value, the operation fails with `UNAVAILABLE`. Refresh remains a separate gateway-managed operation.
+
 ## Credential Refresh
 
 Provider refresh stores non-injectable refresh material separately from the
