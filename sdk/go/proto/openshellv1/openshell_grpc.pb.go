@@ -105,7 +105,6 @@ const (
 	OpenShell_AddWorkspaceMember_FullMethodName            = "/openshell.v1.OpenShell/AddWorkspaceMember"
 	OpenShell_RemoveWorkspaceMember_FullMethodName         = "/openshell.v1.OpenShell/RemoveWorkspaceMember"
 	OpenShell_ListWorkspaceMembers_FullMethodName          = "/openshell.v1.OpenShell/ListWorkspaceMembers"
-	OpenShell_ResolveProviderCredential_FullMethodName     = "/openshell.v1.OpenShell/ResolveProviderCredential"
 )
 
 // OpenShellClient is the client API for OpenShell service.
@@ -336,11 +335,6 @@ type OpenShellClient interface {
 	RemoveWorkspaceMember(ctx context.Context, in *RemoveWorkspaceMemberRequest, opts ...grpc.CallOption) (*RemoveWorkspaceMemberResponse, error)
 	// List members of a workspace.
 	ListWorkspaceMembers(ctx context.Context, in *ListWorkspaceMembersRequest, opts ...grpc.CallOption) (*ListWorkspaceMembersResponse, error)
-	// TODO(upstream credential read): Align this WIP fork RPC and its messages with
-	// the upstream operator credential-read contract once it lands.
-	// Resolve one current provider credential for a trusted control-plane caller.
-	// This reads already-stored material and never initiates token refresh.
-	ResolveProviderCredential(ctx context.Context, in *ResolveProviderCredentialRequest, opts ...grpc.CallOption) (*ResolveProviderCredentialResponse, error)
 }
 
 type openShellClient struct {
@@ -1207,16 +1201,6 @@ func (c *openShellClient) ListWorkspaceMembers(ctx context.Context, in *ListWork
 	return out, nil
 }
 
-func (c *openShellClient) ResolveProviderCredential(ctx context.Context, in *ResolveProviderCredentialRequest, opts ...grpc.CallOption) (*ResolveProviderCredentialResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ResolveProviderCredentialResponse)
-	err := c.cc.Invoke(ctx, OpenShell_ResolveProviderCredential_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // OpenShellServer is the server API for OpenShell service.
 // All implementations must embed UnimplementedOpenShellServer
 // for forward compatibility.
@@ -1445,11 +1429,6 @@ type OpenShellServer interface {
 	RemoveWorkspaceMember(context.Context, *RemoveWorkspaceMemberRequest) (*RemoveWorkspaceMemberResponse, error)
 	// List members of a workspace.
 	ListWorkspaceMembers(context.Context, *ListWorkspaceMembersRequest) (*ListWorkspaceMembersResponse, error)
-	// TODO(upstream credential read): Align this WIP fork RPC and its messages with
-	// the upstream operator credential-read contract once it lands.
-	// Resolve one current provider credential for a trusted control-plane caller.
-	// This reads already-stored material and never initiates token refresh.
-	ResolveProviderCredential(context.Context, *ResolveProviderCredentialRequest) (*ResolveProviderCredentialResponse, error)
 	mustEmbedUnimplementedOpenShellServer()
 }
 
@@ -1705,9 +1684,6 @@ func (UnimplementedOpenShellServer) RemoveWorkspaceMember(context.Context, *Remo
 }
 func (UnimplementedOpenShellServer) ListWorkspaceMembers(context.Context, *ListWorkspaceMembersRequest) (*ListWorkspaceMembersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkspaceMembers not implemented")
-}
-func (UnimplementedOpenShellServer) ResolveProviderCredential(context.Context, *ResolveProviderCredentialRequest) (*ResolveProviderCredentialResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ResolveProviderCredential not implemented")
 }
 func (UnimplementedOpenShellServer) mustEmbedUnimplementedOpenShellServer() {}
 func (UnimplementedOpenShellServer) testEmbeddedByValue()                   {}
@@ -3126,24 +3102,6 @@ func _OpenShell_ListWorkspaceMembers_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
-func _OpenShell_ResolveProviderCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ResolveProviderCredentialRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(OpenShellServer).ResolveProviderCredential(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: OpenShell_ResolveProviderCredential_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(OpenShellServer).ResolveProviderCredential(ctx, req.(*ResolveProviderCredentialRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // OpenShell_ServiceDesc is the grpc.ServiceDesc for OpenShell service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3446,10 +3404,6 @@ var OpenShell_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListWorkspaceMembers",
 			Handler:    _OpenShell_ListWorkspaceMembers_Handler,
-		},
-		{
-			MethodName: "ResolveProviderCredential",
-			Handler:    _OpenShell_ResolveProviderCredential_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

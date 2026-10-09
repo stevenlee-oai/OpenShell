@@ -561,13 +561,6 @@ impl OpenShell for OpenShellService {
         mutation_replay::run(&self.state, request).await
     }
 
-    async fn resolve_provider_credential(
-        &self,
-        request: Request<openshell_core::proto::ResolveProviderCredentialRequest>,
-    ) -> Result<Response<openshell_core::proto::ResolveProviderCredentialResponse>, Status> {
-        provider::handle_resolve_provider_credential(&self.state, request).await
-    }
-
     async fn get_provider_refresh_status(
         &self,
         request: Request<GetProviderRefreshStatusRequest>,

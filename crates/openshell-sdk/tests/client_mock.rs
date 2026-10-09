@@ -734,13 +734,6 @@ impl OpenShell for TestOpenShell {
         Ok(Response::new(proto::ProviderResponse::default()))
     }
 
-    async fn resolve_provider_credential(
-        &self,
-        _: tonic::Request<proto::ResolveProviderCredentialRequest>,
-    ) -> Result<Response<proto::ResolveProviderCredentialResponse>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-
     async fn get_provider_refresh_status(
         &self,
         _: tonic::Request<proto::GetProviderRefreshStatusRequest>,

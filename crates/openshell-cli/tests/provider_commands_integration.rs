@@ -1137,13 +1137,6 @@ impl OpenShell for TestOpenShell {
             mutation_id,
         }))
     }
-    async fn resolve_provider_credential(
-        &self,
-        _: tonic::Request<openshell_core::proto::ResolveProviderCredentialRequest>,
-    ) -> Result<Response<openshell_core::proto::ResolveProviderCredentialResponse>, Status> {
-        Err(Status::unimplemented("unused"))
-    }
-
     async fn get_provider_refresh_status(
         &self,
         request: tonic::Request<GetProviderRefreshStatusRequest>,

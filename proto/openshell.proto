@@ -814,19 +814,6 @@ service OpenShell {
       workspace_role: "user"
     };
   }
-
-  // TODO(upstream credential read): Align this WIP fork RPC and its messages with
-  // the upstream operator credential-read contract once it lands.
-  // Resolve one current provider credential for a trusted control-plane caller.
-  // This reads already-stored material and never initiates token refresh.
-  rpc ResolveProviderCredential(ResolveProviderCredentialRequest)
-      returns (ResolveProviderCredentialResponse) {
-    option (openshell.options.v1.authorization) = {
-      auth_mode: "bearer"
-      scope: "provider:credentials:read"
-      workspace_role: "admin"
-    };
-  }
 }
 
 // IssueSandboxToken request. Empty body; identity is established by the
@@ -3867,21 +3854,4 @@ enum ServiceAuthorizationMode {
   SERVICE_AUTHORIZATION_MODE_STRIP = 1;
   // Forward one syntactically valid bearer Authorization header unchanged.
   SERVICE_AUTHORIZATION_MODE_BEARER_PASSTHROUGH = 2;
-}
-
-// Read one current credential without exposing its backend storage handle.
-message ResolveProviderCredentialRequest {
-  // Workspace scope. Only a named workspace selection is accepted.
-  openshell.datamodel.v1.WorkspaceSelector workspace_scope = 1;
-  // Canonical provider name in the selected workspace.
-  string name = 2;
-  // Provider credential key, not a refresh-material key or storage handle.
-  string credential_key = 3;
-}
-
-message ResolveProviderCredentialResponse {
-  // Plaintext for transient trusted-server use. Never log or persist this response.
-  string value = 1 [(openshell.options.v1.secret) = true];
-  // Earliest expiry reported by the provider or credential backend, when present.
-  google.protobuf.Timestamp expiration_time = 2;
 }

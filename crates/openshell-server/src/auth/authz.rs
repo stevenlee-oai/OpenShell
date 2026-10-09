@@ -491,28 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_credential_reads_require_a_distinct_scope() {
-        let policy = scoped_policy();
-        let method = "/openshell.v1.OpenShell/ResolveProviderCredential";
-        for scope in ["provider:read", "provider:write"] {
-            let reader = identity_with_roles_and_scopes(&["openshell-admin"], &[scope]);
-            assert_eq!(
-                policy.check(&reader, method).unwrap_err().code(),
-                tonic::Code::PermissionDenied
-            );
-        }
-        let reader =
-            identity_with_roles_and_scopes(&["openshell-user"], &["provider:credentials:read"]);
-        assert!(policy.check(&reader, method).is_ok());
-        // Workspace membership/admin authority is checked by the handler. The
-        // distinct scope does not turn this into a Sandbox or peer RPC.
-        let entry = method_authz::lookup(method).unwrap();
-        assert_eq!(entry.workspace_role.as_deref(), Some("admin"));
-        assert!(!method_authz::is_sandbox_callable(method));
-        assert!(!method_authz::is_peer_callable(method));
-    }
-
-    #[test]
     fn get_sandbox_config_requires_config_read_scope() {
         let policy = scoped_policy();
         let id = identity_with_roles_and_scopes(&["openshell-user"], &["config:read"]);
