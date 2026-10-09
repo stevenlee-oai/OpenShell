@@ -555,6 +555,14 @@ curl -s http://localhost:9090/metrics \
 kill "${pf_pid}"
 ```
 
+If OIDC authentication works but provider OAuth refresh reports TLS connection
+failures, check the gateway's CA environment. With
+`server.oidc.caConfigMapName`, the chart sets `SSL_CERT_FILE` to the issuer
+bundle and `SSL_CERT_DIR=/etc/ssl/certs` to retain the image's public roots.
+A private-only `SSL_CERT_FILE` without the system directory replaces public
+trust. Custom images must include their public CA certificates in that
+directory; keep certificate verification enabled.
+
 Check required Helm deployment secrets:
 
 ```bash

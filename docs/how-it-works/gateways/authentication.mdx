@@ -123,6 +123,13 @@ keys from another trusted origin. For local tests, numeric-loopback HTTP also
 requires `dangerouslyAllowInsecureHttp: true`; this setting never permits an
 HTTP hostname or non-loopback address.
 
+For a private HTTPS issuer, set `server.oidc.caConfigMapName` to a ConfigMap
+containing its CA certificates under `ca.crt`. The chart adds this bundle to
+the public roots in the gateway image's `/etc/ssl/certs` directory, so provider
+OAuth refresh can still reach public token endpoints. These CA settings are
+process-wide. Custom gateway images must supply their public CA
+certificates in that directory.
+
 Register an OIDC gateway with the CLI:
 
 ```shell

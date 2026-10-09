@@ -115,12 +115,12 @@ spec:
         # env vars that the TOML references by name. Some process-level
         # settings consumed by libraries outside gateway code also remain here.
         {{- if and .Values.server.oidc.issuer .Values.server.oidc.caConfigMapName }}
-        # OIDC issuer custom-CA: rustls/reqwest read SSL_CERT_FILE for
-        # outbound TLS verification. This is a process-level env var
-        # consumed by the TLS stack itself, not by gateway code, so it
-        # cannot be represented in the gateway TOML schema.
+        # Explicit CA paths replace native trust discovery. Load the issuer
+        # bundle and the image's public roots for outbound HTTPS.
         - name: SSL_CERT_FILE
           value: /etc/openshell-tls/oidc-ca/ca.crt
+        - name: SSL_CERT_DIR
+          value: /etc/ssl/certs
         {{- end }}
         - name: OPENSHELL_TELEMETRY_ENABLED
           value: {{ .Values.server.telemetryEnabled | quote }}

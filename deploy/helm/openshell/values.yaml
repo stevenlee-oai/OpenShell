@@ -581,6 +581,9 @@ server:
     # -- Name of a ConfigMap containing a CA certificate bundle (key: ca.crt)
     # for verifying the OIDC issuer's TLS certificate. Required when the
     # issuer uses a non-public CA (e.g. OpenShift ingress, private PKI).
+    # The bundle augments public roots in the gateway image's /etc/ssl/certs
+    # directory for gateway HTTPS clients. Custom images must provide
+    # their public CA certificates in that directory.
     caConfigMapName: ""
 
 # NetworkPolicy restricting SSH ingress on sandbox pods to the gateway only.
