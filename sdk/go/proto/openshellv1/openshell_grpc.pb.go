@@ -336,6 +336,8 @@ type OpenShellClient interface {
 	RemoveWorkspaceMember(ctx context.Context, in *RemoveWorkspaceMemberRequest, opts ...grpc.CallOption) (*RemoveWorkspaceMemberResponse, error)
 	// List members of a workspace.
 	ListWorkspaceMembers(ctx context.Context, in *ListWorkspaceMembersRequest, opts ...grpc.CallOption) (*ListWorkspaceMembersResponse, error)
+	// TODO(upstream credential read): Align this WIP fork RPC and its messages with
+	// the upstream operator credential-read contract once it lands.
 	// Resolve one current provider credential for a trusted control-plane caller.
 	// This reads already-stored material and never initiates token refresh.
 	ResolveProviderCredential(ctx context.Context, in *ResolveProviderCredentialRequest, opts ...grpc.CallOption) (*ResolveProviderCredentialResponse, error)
@@ -1443,6 +1445,8 @@ type OpenShellServer interface {
 	RemoveWorkspaceMember(context.Context, *RemoveWorkspaceMemberRequest) (*RemoveWorkspaceMemberResponse, error)
 	// List members of a workspace.
 	ListWorkspaceMembers(context.Context, *ListWorkspaceMembersRequest) (*ListWorkspaceMembersResponse, error)
+	// TODO(upstream credential read): Align this WIP fork RPC and its messages with
+	// the upstream operator credential-read contract once it lands.
 	// Resolve one current provider credential for a trusted control-plane caller.
 	// This reads already-stored material and never initiates token refresh.
 	ResolveProviderCredential(context.Context, *ResolveProviderCredentialRequest) (*ResolveProviderCredentialResponse, error)

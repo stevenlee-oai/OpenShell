@@ -815,6 +815,8 @@ service OpenShell {
     };
   }
 
+  // TODO(upstream credential read): Align this WIP fork RPC and its messages with
+  // the upstream operator credential-read contract once it lands.
   // Resolve one current provider credential for a trusted control-plane caller.
   // This reads already-stored material and never initiates token refresh.
   rpc ResolveProviderCredential(ResolveProviderCredentialRequest)

@@ -4501,6 +4501,8 @@ fn derive_issuer_from_token_endpoint(token_endpoint: &str) -> String {
 
 /// Trusted control-plane read of one committed provider credential. Refresh
 /// material is stored separately and is never addressed by this operation.
+// TODO(upstream credential read): Align this WIP fork handler with the upstream
+// operator credential-read contract once it lands.
 pub(super) async fn handle_resolve_provider_credential(
     state: &Arc<ServerState>,
     request: Request<openshell_core::proto::ResolveProviderCredentialRequest>,
