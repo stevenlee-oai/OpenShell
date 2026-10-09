@@ -463,13 +463,58 @@ tests:
             mountPath: /var/log/openshell
             subPathExpr: $(OPENSHELL_POD_NAME)
 
-  - it: mounts the OIDC CA bundle when TLS is disabled
+  - it: leaves image trust defaults unchanged without a custom OIDC CA
+    template: templates/statefulset.yaml
+    set:
+      server.oidc.issuer: https://issuer.example.com
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SSL_CERT_FILE
+            value: /etc/openshell-tls/oidc-ca/ca.crt
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SSL_CERT_DIR
+            value: /etc/ssl/certs
+
+  - it: preserves public roots alongside the custom OIDC CA in a Deployment
+    template: templates/deployment.yaml
+    set:
+      workload.kind: deployment
+      server.externalDbSecret: my-pg-secret
+      server.oidc.issuer: https://issuer.example.com
+      server.oidc.caConfigMapName: openshell-oidc-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SSL_CERT_FILE
+            value: /etc/openshell-tls/oidc-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SSL_CERT_DIR
+            value: /etc/ssl/certs
+
+  - it: preserves public roots and mounts the OIDC CA when TLS is disabled
     template: templates/statefulset.yaml
     set:
       server.disableTls: true
       server.oidc.issuer: https://issuer.example.com
       server.oidc.caConfigMapName: openshell-oidc-ca
     asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SSL_CERT_FILE
+            value: /etc/openshell-tls/oidc-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SSL_CERT_DIR
+            value: /etc/ssl/certs
       - equal:
           path: spec.template.spec.containers[0].volumeMounts[4].name
           value: oidc-ca
