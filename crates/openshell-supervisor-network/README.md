@@ -51,3 +51,31 @@ domain event and a detection finding without credential values or placeholders.
 Explicit body and WebSocket
 rewrite flags authorize those locations for ordinary static credentials. SigV4
 signing retains the endpoint-scoped resolver's existing trusted access.
+
+## Test an external request credential authority
+
+The network test suite exercises request-time bearer injection with a controlled
+TLS authority. To exercise an operator's authority and HTTPS MCP origin, run
+the ignored test with a private JSON descriptor:
+
+```sh
+OPENSHELL_TEST_BROKER_REQUEST=/path/to/private-request.json \
+  cargo test -p openshell-supervisor-network --lib external_request_credential_dispatch \
+  -- --ignored --nocapture
+```
+
+Use a regular file readable only by your user (mode 0600). Specify the
+registration in `middlewareName`, `brokerUrl`, `brokerCaPem` and `audience`.
+Supply its gateway-issued `supervisorToken` and matching `sandboxId`,
+`sandboxName` and `workspace`. `bindingConfig` holds the authority's
+policy configuration. The fixture connects to `originAddress` (IP and port),
+validates TLS against `originHost` with `originCaPem`, and sends a
+`tools/call` JSON object from `body` to the logical `originHost`,
+`originPort` and `path`.
+
+The test prints `OPENSHELL_TEST_HTTP_STATUS` from the downstream response.
+Inspect a controlled origin for the actual arrival, credential version, and
+absence of denied requests without recording raw bearer values. Run the probe
+again after refresh or revocation to compare decisions. The fixture executes
+the inspected supervisor relay in process; the operator supplies the identity
+and endpoint that a live gateway and isolation backend normally provision.

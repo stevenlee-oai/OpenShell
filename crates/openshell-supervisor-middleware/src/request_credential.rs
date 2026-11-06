@@ -8,6 +8,18 @@ use super::{
 };
 use miette::{Result, miette};
 
+/// The authenticated authority denied this operation. Callers may surface a sanitized 403.
+#[derive(Debug)]
+pub struct RequestCredentialDenied;
+
+impl std::fmt::Display for RequestCredentialDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("credential authority denied this request")
+    }
+}
+impl std::error::Error for RequestCredentialDenied {}
+impl miette::Diagnostic for RequestCredentialDenied {}
+
 impl DescribedChainEntry {
     /// Resolve over the authenticated registration. Conditions specific to the protected
     /// origin remain the authority's responsibility; a reply only authorizes this send.
@@ -58,7 +70,13 @@ impl DescribedChainEntry {
         )
         .await
         .map_err(|_| miette!("request credential timed out"))?
-        .map_err(|_| miette!("request credential refused"))?
+        .map_err(|status| {
+            if status.code() == tonic::Code::PermissionDenied {
+                miette::Report::new(RequestCredentialDenied)
+            } else {
+                miette!("request credential authority unavailable")
+            }
+        })?
         .into_inner();
         let expires_at = reply
             .expires_at

@@ -730,20 +730,32 @@ pub(super) async fn prepare_broker_request<C: AsyncRead + AsyncWrite + Unpin>(
     else {
         return Err(miette!("request exceeds credential authority limit"));
     };
-    // Rebuild the final framing first: the authority and the origin must see the same body.
-    let mut outbound_headers = crate::l7::rest::strip_header(&buffered.headers, "authorization")?;
-    // Cookies and proxy authentication are not visible to the broker and could supply a
-    // different identity even after it chose the only authorized credential for this send.
-    for name in ["cookie", "proxy-authorization"] {
-        outbound_headers = crate::l7::rest::strip_header(&outbound_headers, name)?;
+    let headers = safe_middleware_headers(&buffered.headers)?;
+    // Hidden fields can select a different credential or operation (e.g. X-Amz-Target).
+    // Reconstruct the request from the headers visible to the broker. The parser already
+    // validated routing and framing; restore Host and regenerate framing from the buffered body.
+    let request_line = std::str::from_utf8(&buffered.headers)
+        .ok()
+        .and_then(|v| v.split_once("\r\n"))
+        .map(|(line, _)| line)
+        .ok_or_else(|| miette!("invalid request line for credential resolution"))?;
+    let authority = crate::l7::rest::request_authority(&buffered.headers, Some(443))?
+        .ok_or_else(|| miette!("missing request authority for credential resolution"))?;
+    let mut outbound_headers =
+        format!("{request_line}\r\nHost: {}\r\n", authority.authority).into_bytes();
+    for (name, value) in &headers.visible {
+        outbound_headers.extend_from_slice(name.as_bytes());
+        outbound_headers.extend_from_slice(b": ");
+        outbound_headers.extend_from_slice(value.as_bytes());
+        outbound_headers.extend_from_slice(b"\r\n");
     }
+    outbound_headers.extend_from_slice(b"\r\n");
     let mut request = crate::l7::rest::rebuild_request_with_buffered_body(
         &req,
         &outbound_headers,
         &buffered.body,
         &[],
     )?;
-    let headers = safe_middleware_headers(&buffered.headers)?;
     let query = raw_query_from_request_headers(&buffered.headers)?;
     let input = middleware_request_input_with_id(
         &openshell_ocsf::ctx::ctx(),

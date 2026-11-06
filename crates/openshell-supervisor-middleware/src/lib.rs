@@ -7,6 +7,7 @@ mod binding_policy;
 pub mod headers;
 mod remote;
 mod request_credential;
+pub use request_credential::RequestCredentialDenied;
 mod response;
 mod websocket;
 

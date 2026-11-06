@@ -102,6 +102,13 @@ impl HttpRequestCredential for Broker {
                 .iter()
                 .all(|h| h.name != "authorization" && h.name != "cookie")
         );
+        assert!(!input.headers.iter().any(|h| h.name == "x-amz-target"));
+        assert!(
+            input
+                .headers
+                .iter()
+                .any(|h| h.name == "x-approved-header" && h.value == "same-value")
+        );
         let request_id = input.context.unwrap().request_id;
         let path = input.target.unwrap().path;
         let credential = match self.0.fetch_add(1, Ordering::SeqCst) {
@@ -148,31 +155,14 @@ async fn exercise_broker() {
             .add_service(HttpRequestCredentialServer::new(broker.clone()))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
     );
-    let credentials = [(
-        "broker".to_owned(),
-        BearerTokenSlot::new("supervisor-identity", i64::MAX).unwrap(),
-    )]
-    .into_iter()
-    .collect();
-    let registry = MiddlewareRegistry::connect_services_authenticated(
-        vec![],
-        vec![proto::SupervisorMiddlewareService {
-            name: "broker".into(),
-            grpc_endpoint: format!("https://localhost:{}", addr.port()),
-            audience: "test-broker".into(),
-            tls_ca_cert_pem: pem.into_bytes(),
-            max_payload_bytes: 65536,
-            allow_insecure_transport: false,
-            binding_policy: proto::SupervisorMiddlewareBindingPolicy::Exact.into(),
-            bindings: vec![
-                proto::SupervisorMiddlewareBinding::HttpRequestCredentialInjection.into(),
-            ],
-            ..Default::default()
-        }],
-        &credentials,
+    let registry = authenticated_registry(
+        "broker",
+        format!("https://localhost:{}", addr.port()),
+        pem,
+        "test-broker",
+        "supervisor-identity",
     )
-    .await
-    .unwrap();
+    .await;
     let data = r"
 network_middlewares:
   request-account:
@@ -229,7 +219,7 @@ network_policies:
         let relay = tokio::spawn(async move {
             relay_with_inspection(&cfg, tunnel, &mut supervisor, &mut upstream, &context).await
         });
-        app.write_all(format!("GET {path} HTTP/1.1\r\nHost: api.example.test\r\nAuthorization: Bearer workload-value\r\nCookie: session=workload\r\n\r\n").as_bytes()).await.unwrap();
+        app.write_all(format!("GET {path} HTTP/1.1\r\nHost: api.example.test\r\nAuthorization: Bearer workload-value\r\nCookie: session=workload\r\nX-Amz-Target: unreviewed-workload-operation\r\nX-Approved-Header: same-value\r\n\r\n").as_bytes()).await.unwrap();
         if permitted {
             let mut wire = vec![];
             while !wire.ends_with(b"\r\n\r\n") {
@@ -245,6 +235,11 @@ network_policies:
                 .collect();
             assert_eq!(auth, expected.map(|t| format!("Bearer {t}")).as_slice());
             assert!(!message.contains("workload"));
+            assert!(
+                message
+                    .to_ascii_lowercase()
+                    .contains("x-approved-header: same-value")
+            );
             origin
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
@@ -252,7 +247,11 @@ network_policies:
         }
         let mut bytes = [0; 128];
         let n = app.read(&mut bytes).await.unwrap();
-        assert_eq!(bytes[..n].starts_with(b"HTTP/1.1 200"), permitted);
+        if permitted {
+            assert!(bytes[..n].starts_with(b"HTTP/1.1 200"));
+        } else {
+            assert!(bytes[..n].starts_with(b"HTTP/1.1 403"));
+        }
         drop(app);
         relay.await.unwrap().unwrap();
         if !permitted {
@@ -291,4 +290,181 @@ network_policies:
     }
     assert_eq!(broker.0.load(Ordering::SeqCst), 4);
     server.abort();
+}
+
+async fn authenticated_registry(
+    name: &str,
+    url: String,
+    ca_pem: String,
+    audience: &str,
+    supervisor_token: &str,
+) -> MiddlewareRegistry {
+    let credentials = [(
+        name.to_owned(),
+        BearerTokenSlot::new(supervisor_token, i64::MAX).unwrap(),
+    )]
+    .into_iter()
+    .collect();
+    MiddlewareRegistry::connect_services_authenticated(
+        vec![],
+        vec![proto::SupervisorMiddlewareService {
+            name: name.into(),
+            grpc_endpoint: url,
+            audience: audience.into(),
+            tls_ca_cert_pem: ca_pem.into_bytes(),
+            max_payload_bytes: 65536,
+            request_timeout: Some(prost_types::Duration {
+                seconds: 10,
+                nanos: 0,
+            }),
+            binding_policy: proto::SupervisorMiddlewareBindingPolicy::Exact.into(),
+            bindings: vec![
+                proto::SupervisorMiddlewareBinding::HttpRequestCredentialInjection.into(),
+            ],
+            ..Default::default()
+        }],
+        &credentials,
+    )
+    .await
+    .expect("authenticate credential authority")
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExternalRequest {
+    broker_url: String,
+    broker_ca_pem: String,
+    audience: String,
+    supervisor_token: String,
+    sandbox_id: String,
+    sandbox_name: String,
+    workspace: String,
+    middleware_name: String,
+    binding_config: serde_json::Value,
+    origin_host: String,
+    origin_port: u16,
+    origin_address: std::net::SocketAddr,
+    origin_ca_pem: String,
+    path: String,
+    body: serde_json::Value,
+}
+
+/// Connect an installed authority to a controlled HTTPS origin using the native inspected relay.
+/// Each invocation receives a fresh sandbox identity and reports only the downstream HTTP status.
+#[tokio::test]
+#[ignore = "requires an external credential broker, signed supervisor identity and HTTPS origin"]
+async fn external_request_credential_dispatch() {
+    let path =
+        std::env::var_os("OPENSHELL_TEST_BROKER_REQUEST").expect("private request fixture path");
+    let file = std::fs::File::open(path).expect("open fixture");
+    let meta = file.metadata().unwrap();
+    assert!(
+        meta.is_file() && meta.len() <= 256 * 1024,
+        "expected a bounded regular request fixture"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            meta.permissions().mode() & 0o077,
+            0,
+            "fixture contains a supervisor credential"
+        );
+    }
+    let input: ExternalRequest = serde_json::from_reader(file).expect("parse request fixture");
+    let registry = authenticated_registry(
+        &input.middleware_name,
+        input.broker_url,
+        input.broker_ca_pem,
+        &input.audience,
+        &input.supervisor_token,
+    )
+    .await;
+    let tool = input
+        .body
+        .pointer("/params/name")
+        .and_then(serde_json::Value::as_str)
+        .expect("provide an MCP tools/call request");
+    let data = serde_json::json!({
+       "network_middlewares": {"broker": {"middleware":input.middleware_name, "on_error":"fail_closed", "endpoints":{"include":[input.origin_host]}, "config":input.binding_config}},
+       "network_policies":{"mcp":{"name":"mcp","endpoints":[{"host":input.origin_host,"port":input.origin_port,"path":input.path,"protocol":"mcp","enforcement":"enforce","mcp":{"versions":["2025-11-25"]},"rules":[{"allow":{"method":"tools/call","tool":tool}}]}],"binaries":[{"path":"/usr/bin/node"}]}}
+    });
+    let engine = OpaEngine::from_strings(
+        include_str!("../../../data/sandbox-policy.rego"),
+        &data.to_string(),
+    )
+    .unwrap();
+    engine.set_middleware_runner_for_tests(ChainRunner::from_registry(registry));
+    let workload = NetworkInput {
+        host: input.origin_host.clone(),
+        port: input.origin_port,
+        binary_path: "/usr/bin/node".into(),
+        binary_sha256: "fixture".into(),
+        ancestors: vec![],
+        cmdline_paths: vec![],
+    };
+    let (config, generation) = engine
+        .query_endpoint_config_with_generation(&workload)
+        .unwrap();
+    let config = crate::l7::parse_l7_config(&config.unwrap()).unwrap();
+    let evaluator = engine.clone_engine_for_tunnel(generation).unwrap();
+    let ctx = L7EvalContext {
+        host: input.origin_host.clone(),
+        port: input.origin_port,
+        workspace: input.workspace,
+        request_default_port: Some(443),
+        binary_path: "/usr/bin/node".into(),
+        policy_name: "mcp".into(),
+        ..Default::default()
+    };
+    let context = openshell_ocsf::EventContext {
+        sandbox_id: input.sandbox_id,
+        sandbox_name: input.sandbox_name,
+        ..(*openshell_ocsf::ctx::ctx()).clone()
+    };
+    openshell_ocsf::ctx::bind_thread_ctx(Some(Arc::new(context)));
+    let trust = crate::l7::tls::build_upstream_client_config(&input.origin_ca_pem).unwrap();
+    let tcp = tokio::net::TcpStream::connect(input.origin_address)
+        .await
+        .expect("connect HTTPS origin");
+    let name = rustls::pki_types::ServerName::try_from(input.origin_host.clone()).unwrap();
+    let mut origin = tokio_rustls::TlsConnector::from(trust)
+        .connect(name, tcp)
+        .await
+        .expect("verify HTTPS origin");
+    let (mut caller, mut client) = tokio::io::duplex(65536);
+    let relay = tokio::spawn(async move {
+        relay_with_inspection(&config, evaluator, &mut client, &mut origin, &ctx).await
+    });
+    let authority = if input.origin_port == 443 {
+        input.origin_host
+    } else {
+        format!("{}:{}", input.origin_host, input.origin_port)
+    };
+    let body = input.body.to_string();
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer workload-value\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-11-25\r\nContent-Length: {}\r\n\r\n{body}",
+        input.path,
+        body.len()
+    );
+    caller.write_all(request.as_bytes()).await.unwrap();
+    let mut status_line = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while !status_line.ends_with(b"\r\n") && status_line.len() < 512 {
+            status_line.push(caller.read_u8().await.expect("downstream status"));
+        }
+    })
+    .await
+    .expect("complete downstream status");
+    let status = std::str::from_utf8(&status_line)
+        .unwrap()
+        .split_ascii_whitespace()
+        .nth(1)
+        .expect("HTTP status")
+        .parse::<u16>()
+        .unwrap();
+    println!("OPENSHELL_TEST_HTTP_STATUS={status}");
+    drop(caller);
+    relay.abort();
+    openshell_ocsf::ctx::bind_thread_ctx(None);
 }

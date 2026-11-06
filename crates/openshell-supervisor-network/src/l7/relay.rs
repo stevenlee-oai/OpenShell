@@ -757,6 +757,16 @@ where
     {
         Ok(prepared) => prepared,
         Err(error) => {
+            if error.is::<openshell_supervisor_middleware::RequestCredentialDenied>() {
+                client
+                    .write_all(
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .into_diagnostic()?;
+                client.flush().await.into_diagnostic()?;
+                return Ok(None);
+            }
             if let Some(refusal) =
                 error.downcast_ref::<crate::l7::token_grant_injection::TokenGrantInjectionError>()
             {
