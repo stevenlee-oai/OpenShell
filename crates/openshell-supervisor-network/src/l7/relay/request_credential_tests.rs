@@ -299,12 +299,10 @@ async fn authenticated_registry(
     audience: &str,
     supervisor_token: &str,
 ) -> MiddlewareRegistry {
-    let credentials = [(
+    let credentials = std::collections::HashMap::from([(
         name.to_owned(),
         BearerTokenSlot::new(supervisor_token, i64::MAX).unwrap(),
-    )]
-    .into_iter()
-    .collect();
+    )]);
     MiddlewareRegistry::connect_services_authenticated(
         vec![],
         vec![proto::SupervisorMiddlewareService {

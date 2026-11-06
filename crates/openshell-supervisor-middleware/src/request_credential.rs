@@ -7,6 +7,7 @@ use super::{
     SupervisorMiddlewarePhase, request_view_to_evaluation, validate_request_view,
 };
 use miette::{Result, miette};
+use openshell_core::proto::http_request_credential_result::Credential;
 
 /// The authenticated authority denied this operation. Callers may surface a sanitized 403.
 #[derive(Debug)]
@@ -89,7 +90,6 @@ impl DescribedChainEntry {
                 "request credential reply belongs to another request"
             ));
         }
-        use openshell_core::proto::http_request_credential_result::Credential;
         let token = match reply.credential {
             Some(Credential::BearerToken(token)) => {
                 let payload = token.trim_end_matches('=');

@@ -5375,6 +5375,7 @@ where
             body_classifier: options.body_classifier,
             mcp_request_validation: None,
             credential_generation: options.credential_generation,
+            send_deadline: None,
             generation_guard: Some(options.generation_guard),
             websocket_extensions: options.websocket_extensions,
             request_body_credential_rewrite: options.request_body_credential_rewrite,
@@ -5387,7 +5388,6 @@ where
         },
         response_middleware,
         options.endpoint_observer,
-        None,
     )
     .await
 }

@@ -751,6 +751,7 @@ where
             body_classifier: None,
             mcp_request_validation: None,
             credential_generation: None,
+            send_deadline: None,
             generation_guard,
             websocket_extensions: WebSocketExtensionMode::Preserve,
             request_body_credential_rewrite: false,
@@ -779,6 +780,8 @@ pub(crate) struct RelayRequestOptions<'a> {
     /// Revalidate buffered MCP requests after header transformations.
     pub(crate) mcp_request_validation: Option<McpRequestValidation<'a>>,
     pub(crate) credential_generation: Option<CredentialGenerationGuard<'a>>,
+    /// Terminal authority deadline for the first upstream write of this operation.
+    pub(crate) send_deadline: Option<std::time::SystemTime>,
     pub(crate) generation_guard: Option<&'a PolicyGenerationGuard>,
     pub(crate) websocket_extensions: WebSocketExtensionMode,
     pub(crate) request_body_credential_rewrite: bool,
@@ -884,7 +887,7 @@ where
     U: AsyncRead + AsyncWrite + Unpin,
 {
     relay_http_request_with_response_middleware_guarded_observed(
-        req, client, upstream, options, None, None, None,
+        req, client, upstream, options, None, None,
     )
     .await
 }
@@ -896,7 +899,6 @@ pub(crate) async fn relay_http_request_with_response_middleware_guarded_observed
     options: RelayRequestOptions<'_>,
     response_middleware: Option<HttpResponseMiddlewareRelay<'_>>,
     observer: Option<&EndpointObserver>,
-    send_deadline: Option<std::time::SystemTime>,
 ) -> Result<RelayOutcome>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -905,7 +907,7 @@ where
     let mut observed_upstream = ObservedUpstream {
         upstream,
         observer,
-        send_deadline,
+        send_deadline: options.send_deadline,
     };
     let upstream = &mut observed_upstream;
     ensure_credential_generation_current(options)?;
@@ -6266,7 +6268,6 @@ mod tests {
                     },
                     None,
                     Some(&observer),
-                    None,
                 ),
             )
             .await

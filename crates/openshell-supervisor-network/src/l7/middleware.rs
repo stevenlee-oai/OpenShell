@@ -704,7 +704,6 @@ pub async fn send_middleware_admission_exhausted_response<
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Buffer and normalize the final HTTP request before presenting it to the broker.
 /// The client socket cannot contribute new body bytes after authorization.
 pub(super) async fn prepare_broker_request<C: AsyncRead + AsyncWrite + Unpin>(
@@ -777,6 +776,7 @@ pub(super) async fn prepare_broker_request<C: AsyncRead + AsyncWrite + Unpin>(
     Ok((request, expires_at))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn middleware_request_input_with_id(
     sandbox: &openshell_ocsf::EventContext,
     scheme: &str,

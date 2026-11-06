@@ -820,6 +820,7 @@ where
                 },
             ),
             credential_generation: credential_generation_guard(ctx),
+            send_deadline,
             generation_guard: Some(engine.generation_guard()),
             websocket_extensions: websocket_extension_mode(config, websocket_middleware),
             request_body_credential_rewrite: config.protocol == L7Protocol::Rest
@@ -843,7 +844,6 @@ where
             Some(engine.generation_guard()),
         )),
         observer.as_ref(),
-        send_deadline,
     )
     .await
 }
@@ -868,7 +868,6 @@ where
         ctx,
         response_middleware,
         None,
-        None,
     )
     .await
 }
@@ -881,7 +880,6 @@ async fn relay_http_request_with_credential_rejection_observed<C, U>(
     ctx: &L7EvalContext,
     response_middleware: Option<crate::l7::rest::HttpResponseMiddlewareRelay<'_>>,
     observer: Option<&EndpointObserver>,
-    send_deadline: Option<std::time::SystemTime>,
 ) -> Result<Option<RelayOutcome>>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -895,7 +893,6 @@ where
             options,
             response_middleware,
             observer,
-            send_deadline,
         ),
     )
     .await
@@ -3785,6 +3782,7 @@ where
             crate::l7::rest::RelayRequestOptions {
                 resolver,
                 credential_generation: credential_generation_guard(ctx),
+                send_deadline: None,
                 generation_guard: Some(generation_guard),
                 ..Default::default()
             },
@@ -3991,7 +3989,6 @@ mod tests {
             &L7EvalContext::default(),
             None,
             Some(&observer),
-            None,
         )
         .await;
         if disconnect_client {
