@@ -5387,6 +5387,7 @@ where
         },
         response_middleware,
         options.endpoint_observer,
+        None,
     )
     .await
 }

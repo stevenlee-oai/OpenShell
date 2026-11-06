@@ -6,6 +6,7 @@
 mod binding_policy;
 pub mod headers;
 mod remote;
+mod request_credential;
 mod response;
 mod websocket;
 
@@ -878,6 +879,10 @@ fn supported_binding(
             Some(SupervisorMiddlewarePhase::PreCredentials),
         ) => Ok(SupervisorMiddlewareBinding::HttpRequestPreCredentials),
         (
+            Some(SupervisorMiddlewareOperation::HttpRequestCredential),
+            Some(SupervisorMiddlewarePhase::CredentialInjection),
+        ) => Ok(SupervisorMiddlewareBinding::HttpRequestCredentialInjection),
+        (
             Some(SupervisorMiddlewareOperation::HttpResponse),
             Some(SupervisorMiddlewarePhase::PreReturn),
         ) => Ok(SupervisorMiddlewareBinding::HttpResponsePreReturn),
@@ -951,6 +956,22 @@ fn authorize_external_manifest(
     let source = format!("external middleware registration '{}'", registration.name);
     let mut bindings = validate_manifest_bindings(&source, manifest)?;
     policy.authorize(&source, &mut bindings)?;
+    if bindings.contains_key(&SupervisorMiddlewareBinding::HttpRequestCredentialInjection)
+        && (matches!(policy, BindingPolicy::Dynamic)
+            || !authenticated
+            || registration.allow_insecure_transport
+            || !registration.grpc_endpoint.starts_with("https://")
+            || manifest.expected_audience.is_empty()
+            || !manifest.extension.as_ref().is_some_and(|metadata| {
+                metadata.supported_capabilities.iter().any(|capability| {
+                    capability == openshell_core::extension_protocol::HTTP_REQUEST_CREDENTIAL
+                })
+            }))
+    {
+        return Err(miette!(
+            "{source} requires authenticated HTTPS, an explicit credential binding, an exact audience and the request-credential capability"
+        ));
+    }
     let operator_max_payload_bytes = registration.max_payload_bytes;
     for binding in bindings.values() {
         let advertised = binding.max_payload_bytes;
@@ -1165,7 +1186,13 @@ impl MiddlewareRegistry {
                     manifest.name
                 ));
             }
-            validate_manifest_bindings(&source, &manifest)?;
+            if validate_manifest_bindings(&source, &manifest)?
+                .contains_key(&SupervisorMiddlewareBinding::HttpRequestCredentialInjection)
+            {
+                return Err(miette!(
+                    "request credentials require an authenticated remote registration"
+                ));
+            }
             negotiated_extensions.push(
                 negotiate(
                     ExtensionFamily::SupervisorMiddleware,

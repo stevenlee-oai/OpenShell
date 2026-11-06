@@ -7,6 +7,7 @@ package openshell.middleware.v1;
 
 import "google/protobuf/struct.proto";
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "extension.proto";
 
 // SupervisorMiddleware discovers and configures one operator-run middleware.
@@ -70,6 +71,26 @@ message MiddlewareManifest {
   // Declare protocol 1.0 and list "openshell.supervisor-middleware.contract"
   // in supported_capabilities.
   openshell.extension.v1.PeerMetadata extension = 5;
+}
+
+// An authenticated credential authority returns an upstream bearer for this request only.
+// OpenShell calls it after request middleware and local policy, before the upstream write.
+// A non-OK status denies dispatch. OpenShell never caches a reply or exposes it to the workload.
+service HttpRequestCredential {
+  rpc Resolve(HttpRequestEvaluation) returns (HttpRequestCredentialResult);
+}
+
+message HttpRequestCredentialResult {
+  // Match the identifier from the final request's context.
+  string request_id = 1;
+  // RFC 6750 bearer token. OpenShell supplies the Authorization header name and scheme.
+  oneof credential {
+    string bearer_token = 2;
+    // Explicitly permit this request without Authorization, including any caller-provided value.
+    bool send_without_credential = 4;
+  }
+  // Deadline for starting the authorized send (at most the credential's expiry).
+  google.protobuf.Timestamp expires_at = 3;
 }
 
 // MiddlewareBinding declares one operation and phase supported by a service.
@@ -459,6 +480,7 @@ enum SupervisorMiddlewareOperation {
   SUPERVISOR_MIDDLEWARE_OPERATION_HTTP_REQUEST = 1;
   SUPERVISOR_MIDDLEWARE_OPERATION_WEBSOCKET_MESSAGE = 2;
   SUPERVISOR_MIDDLEWARE_OPERATION_HTTP_RESPONSE = 3;
+  SUPERVISOR_MIDDLEWARE_OPERATION_HTTP_REQUEST_CREDENTIAL = 5;
 }
 
 // Ordered phase within a supervisor operation.
@@ -466,6 +488,7 @@ enum SupervisorMiddlewarePhase {
   SUPERVISOR_MIDDLEWARE_PHASE_UNSPECIFIED = 0;
   SUPERVISOR_MIDDLEWARE_PHASE_PRE_CREDENTIALS = 1;
   SUPERVISOR_MIDDLEWARE_PHASE_PRE_RETURN = 2;
+  SUPERVISOR_MIDDLEWARE_PHASE_CREDENTIAL_INJECTION = 3;
 }
 
 // WebSocketSessionEvent is one ordered event in a stage-local stream.

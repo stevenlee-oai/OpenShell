@@ -57,6 +57,15 @@ pub trait SupervisorMiddlewareEndpoint: Send + Sync {
         requests: mpsc::Receiver<WebSocketSessionEvent>,
     ) -> Result<WebSocketResponseStream, Status>;
 
+    async fn resolve_http_credential(
+        &self,
+        _request: Request<HttpRequestEvaluation>,
+    ) -> Result<Response<crate::proto::HttpRequestCredentialResult>, Status> {
+        Err(Status::unimplemented(
+            "request credential resolution unavailable",
+        ))
+    }
+
     async fn open_http_response_pre_return(
         &self,
         _requests: mpsc::Receiver<HttpResponseEvent>,

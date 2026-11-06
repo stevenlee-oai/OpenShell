@@ -22,6 +22,14 @@ Your service declares each operation it supports as a binding, an operation and 
 
 When several middleware match the same traffic, OpenShell calls them in ascending `order`, and each middleware sees the changes that earlier middleware made.
 
+### Resolve a credential for one request
+
+Use `HttpRequestCredential.Resolve` to authorize an inspected HTTPS request and return the credential for that dispatch. The supervisor calls this service after HTTP request middleware has finished and local REST or MCP policy permits the resulting request. The authority receives the actual destination, query, visible headers, and buffered body. Verify the gateway-signed supervisor identity, current grant, and allowed operation before returning a result.
+
+The operator registers the authority over authenticated HTTPS with an explicit `http_request_credential_injection` binding and attaches it to a destination using `on_error: fail_closed`. The authority advertises `HTTP_REQUEST_CREDENTIAL / CREDENTIAL_INJECTION`, its expected audience, and `openshell.supervisor-middleware.http-request-credential.v1`. Only one credential authority can handle a request.
+
+Return the request ID, a deadline for the first upstream write, and either a bearer token or an explicit `send_without_credential: true` for a public request. For a refusal, return a non-OK gRPC status. The supervisor removes the workload's Authorization and Cookie headers, presents the selected bearer for that request, and resolves again on the next request. It checks the deadline immediately before the first write. The workload receives only the origin's response. The authority must restrict credentialed requests to trusted origins because the origin receives the bearer.
+
 ## Common Inputs and Results
 
 Every operation includes a request context. The context always includes `sandbox_id`. Use it for authorization, persistence, and correlation. The context also includes `sandbox` and `workspace` names when available. Names can be reused, so use them only for display and logging.

@@ -49,7 +49,7 @@ timeout = "500ms"
 </ParamField>
 
 <ParamField path="bindings" type="string[]">
-  Bindings required by `allowlist` or `exact`: `http_request_pre_credentials`, `http_response_pre_return`, or `websocket_message_pre_credentials`. An allowlist ignores additional valid bindings; an exact policy rejects them. Omit this field for dynamic discovery. [Gateway Configuration](/how-it-works/gateways/configuration#supervisor-middleware-services) explains upgrade requirements.
+  Bindings required by `allowlist` or `exact`: `http_request_pre_credentials`, `http_response_pre_return`, `websocket_message_pre_credentials`, or `http_request_credential_injection`. Credential injection requires an explicit binding and authenticated HTTPS. An allowlist ignores additional valid bindings; an exact policy rejects them. Omit this field for dynamic discovery. [Gateway Configuration](/how-it-works/gateways/configuration#supervisor-middleware-services) explains upgrade requirements.
 </ParamField>
 
 <ParamField path="timeout" type="string" default="500ms">

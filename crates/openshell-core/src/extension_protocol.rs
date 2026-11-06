@@ -31,6 +31,10 @@ pub const COMPUTE_UPDATE_SANDBOX_CONFIGURATION: &str =
 
 const MAX_IMPLEMENTATION_NAME_BYTES: usize = 128;
 const MAX_IMPLEMENTATION_VERSION_BYTES: usize = 128;
+/// The supervisor can resolve a bearer from an explicitly configured broker at final dispatch.
+pub const HTTP_REQUEST_CREDENTIAL: &str =
+    "openshell.supervisor-middleware.http-request-credential.v1";
+
 const MAX_CAPABILITY_BYTES: usize = 128;
 const MAX_CAPABILITIES: usize = 128;
 
@@ -129,6 +133,9 @@ pub enum NegotiationError {
 pub fn gateway_metadata(family: ExtensionFamily) -> PeerMetadata {
     let contract = family.contract_capability();
     let mut supported_capabilities = vec![contract.clone()];
+    if family == ExtensionFamily::SupervisorMiddleware {
+        supported_capabilities.push(HTTP_REQUEST_CREDENTIAL.to_string());
+    }
     if family == ExtensionFamily::Compute {
         supported_capabilities.push(COMPUTE_LAUNCH_AUTHENTICATION.to_string());
         supported_capabilities.push(COMPUTE_ISOLATION_BACKEND.to_string());

@@ -37,6 +37,8 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, warn};
 
 #[cfg(test)]
+mod request_credential_tests;
+#[cfg(test)]
 mod token_grant_ownership_tests;
 
 const CONNECTION_READ_AHEAD_BYTES: usize = 8 * 1024;
@@ -704,15 +706,53 @@ where
         websocket_middleware,
         observation_context,
     } = forwarding;
-    let (request, grant_ctx) = match prepare_inspected_request(
-        request,
-        ctx,
-        engine,
-        config,
-        request_info,
-        request_id,
-        observation_context,
-    )
+    let credential = engine
+        .middleware_runner()
+        .request_credential(response_chain)
+        .await;
+    let (request, grant_ctx, send_deadline) = match async {
+        if let Some(broker) = credential? {
+            // The CONNECT handler sets Some(443) only on the terminated upstream TLS
+            // path. Unspecified transport is never positive evidence of a secure hop.
+            let authority = crate::l7::rest::request_authority(&request.raw_header, Some(443))?;
+            if ctx.request_default_port != Some(443)
+                || !authority.is_some_and(|a| {
+                    normalized_endpoint_host(a.authority.host())
+                        .eq_ignore_ascii_case(normalized_endpoint_host(&ctx.host))
+                        && a.effective_port == ctx.port
+                })
+                || config.enforcement != EnforcementMode::Enforce
+                || config.credential_signing.is_sigv4()
+                || config.request_body_credential_rewrite
+                || !matches!(config.protocol, L7Protocol::Rest | L7Protocol::Mcp)
+                || crate::l7::rest::request_is_websocket_upgrade(&request.raw_header)
+            {
+                return Err(miette!(
+                    "request credential requires an enforced, inspected HTTPS operation"
+                ));
+            }
+            let (request, expires_at) = crate::l7::middleware::prepare_broker_request(
+                request, client, ctx, engine, &broker, request_id,
+            )
+            .await?;
+            let mut scoped = ctx.clone();
+            scoped.secret_resolver = None;
+            scoped.provider_credential_revision = None;
+            scoped.provider_credential_installation_id = None;
+            return Ok((request, scoped, Some(expires_at)));
+        }
+        let (request, grant_ctx) = prepare_inspected_request(
+            request,
+            ctx,
+            engine,
+            config,
+            request_info,
+            request_id,
+            observation_context,
+        )
+        .await?;
+        Ok((request, grant_ctx, None))
+    }
     .await
     {
         Ok(prepared) => prepared,
@@ -740,7 +780,14 @@ where
             return Ok(None);
         }
     };
-    *ctx = grant_ctx;
+    // Broker material belongs only to this request. In particular, do not clear
+    // the connection's provider resolver for a later request to another route.
+    let ctx = if send_deadline.is_some() {
+        &grant_ctx
+    } else {
+        *ctx = grant_ctx;
+        &*ctx
+    };
     let observer = EndpointObserver::begin_captured(
         ctx.endpoint_observation_tx.as_ref(),
         config,
@@ -786,6 +833,7 @@ where
             Some(engine.generation_guard()),
         )),
         observer.as_ref(),
+        send_deadline,
     )
     .await
 }
@@ -810,6 +858,7 @@ where
         ctx,
         response_middleware,
         None,
+        None,
     )
     .await
 }
@@ -822,6 +871,7 @@ async fn relay_http_request_with_credential_rejection_observed<C, U>(
     ctx: &L7EvalContext,
     response_middleware: Option<crate::l7::rest::HttpResponseMiddlewareRelay<'_>>,
     observer: Option<&EndpointObserver>,
+    send_deadline: Option<std::time::SystemTime>,
 ) -> Result<Option<RelayOutcome>>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -835,6 +885,7 @@ where
             options,
             response_middleware,
             observer,
+            send_deadline,
         ),
     )
     .await
@@ -3930,6 +3981,7 @@ mod tests {
             &L7EvalContext::default(),
             None,
             Some(&observer),
+            None,
         )
         .await;
         if disconnect_client {

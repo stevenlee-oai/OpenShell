@@ -364,6 +364,8 @@ const (
 	SupervisorMiddlewareBinding_SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_PRE_CREDENTIALS      SupervisorMiddlewareBinding = 1
 	SupervisorMiddlewareBinding_SUPERVISOR_MIDDLEWARE_BINDING_HTTP_RESPONSE_PRE_RETURN          SupervisorMiddlewareBinding = 2
 	SupervisorMiddlewareBinding_SUPERVISOR_MIDDLEWARE_BINDING_WEBSOCKET_MESSAGE_PRE_CREDENTIALS SupervisorMiddlewareBinding = 3
+	// Requires authenticated transport and explicit operator authorization.
+	SupervisorMiddlewareBinding_SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_CREDENTIAL_INJECTION SupervisorMiddlewareBinding = 4
 )
 
 // Enum value maps for SupervisorMiddlewareBinding.
@@ -373,12 +375,14 @@ var (
 		1: "SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_PRE_CREDENTIALS",
 		2: "SUPERVISOR_MIDDLEWARE_BINDING_HTTP_RESPONSE_PRE_RETURN",
 		3: "SUPERVISOR_MIDDLEWARE_BINDING_WEBSOCKET_MESSAGE_PRE_CREDENTIALS",
+		4: "SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_CREDENTIAL_INJECTION",
 	}
 	SupervisorMiddlewareBinding_value = map[string]int32{
 		"SUPERVISOR_MIDDLEWARE_BINDING_UNSPECIFIED":                       0,
 		"SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_PRE_CREDENTIALS":      1,
 		"SUPERVISOR_MIDDLEWARE_BINDING_HTTP_RESPONSE_PRE_RETURN":          2,
 		"SUPERVISOR_MIDDLEWARE_BINDING_WEBSOCKET_MESSAGE_PRE_CREDENTIALS": 3,
+		"SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_CREDENTIAL_INJECTION": 4,
 	}
 )
 
@@ -952,7 +956,6 @@ type NetworkEndpoint struct {
 	// When non-empty, the SSRF internal-IP check is replaced by an allowlist check:
 	//   - If host is also set: domain must resolve to an IP in this list.
 	//   - If host is empty: any domain is allowed as long as it resolves to an IP in this list.
-	//
 	// Supports exact IPs ("10.0.5.20") and CIDR notation ("10.0.5.0/24").
 	// Loopback (127.0.0.0/8) and link-local (169.254.0.0/16) are always blocked
 	// regardless of this field.
@@ -2943,12 +2946,13 @@ const file_sandbox_proto_rawDesc = "" +
 	"0SUPERVISOR_MIDDLEWARE_BINDING_POLICY_UNSPECIFIED\x10\x00\x120\n" +
 	",SUPERVISOR_MIDDLEWARE_BINDING_POLICY_DYNAMIC\x10\x01\x122\n" +
 	".SUPERVISOR_MIDDLEWARE_BINDING_POLICY_ALLOWLIST\x10\x02\x12.\n" +
-	"*SUPERVISOR_MIDDLEWARE_BINDING_POLICY_EXACT\x10\x03*\x8d\x02\n" +
+	"*SUPERVISOR_MIDDLEWARE_BINDING_POLICY_EXACT\x10\x03*\xd2\x02\n" +
 	"\x1bSupervisorMiddlewareBinding\x12-\n" +
 	")SUPERVISOR_MIDDLEWARE_BINDING_UNSPECIFIED\x10\x00\x12>\n" +
 	":SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_PRE_CREDENTIALS\x10\x01\x12:\n" +
 	"6SUPERVISOR_MIDDLEWARE_BINDING_HTTP_RESPONSE_PRE_RETURN\x10\x02\x12C\n" +
-	"?SUPERVISOR_MIDDLEWARE_BINDING_WEBSOCKET_MESSAGE_PRE_CREDENTIALS\x10\x03b\x06proto3"
+	"?SUPERVISOR_MIDDLEWARE_BINDING_WEBSOCKET_MESSAGE_PRE_CREDENTIALS\x10\x03\x12C\n" +
+	"?SUPERVISOR_MIDDLEWARE_BINDING_HTTP_REQUEST_CREDENTIAL_INJECTION\x10\x04b\x06proto3"
 
 var (
 	file_sandbox_proto_rawDescOnce sync.Once

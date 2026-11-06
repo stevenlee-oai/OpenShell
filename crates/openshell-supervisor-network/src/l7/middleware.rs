@@ -62,6 +62,11 @@ impl HttpMiddlewareExchange {
     where
         C: AsyncRead + AsyncWrite + Unpin + Send,
     {
+        // Explicit HTTP forwarding does not own a terminated HTTPS tunnel. A route
+        // requiring trusted credential injection may only use the inspected TLS sender.
+        if self.runner.request_credential(&self.chain).await?.is_some() {
+            return Ok(MiddlewareApplyResult::Denied { denial: None });
+        }
         apply_middleware_chain_for_scheme_with_request_id(
             request,
             client,
@@ -700,6 +705,66 @@ pub async fn send_middleware_admission_exhausted_response<
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Buffer and normalize the final HTTP request before presenting it to the broker.
+/// The client socket cannot contribute new body bytes after authorization.
+pub(super) async fn prepare_broker_request<C: AsyncRead + AsyncWrite + Unpin>(
+    req: crate::l7::provider::L7Request,
+    client: &mut C,
+    ctx: &L7EvalContext,
+    engine: &crate::opa::TunnelPolicyEngine,
+    broker: &openshell_supervisor_middleware::DescribedChainEntry,
+    request_id: &str,
+) -> Result<(crate::l7::provider::L7Request, std::time::SystemTime)> {
+    let _capacity = engine
+        .middleware_runner()
+        .reserve_middleware_work_admission()
+        .await?;
+    let crate::l7::rest::BufferResult::Buffered(buffered) =
+        crate::l7::rest::buffer_request_body_for_middleware(
+            &req,
+            client,
+            Some(engine.generation_guard()),
+            broker.max_payload_bytes(),
+        )
+        .await?
+    else {
+        return Err(miette!("request exceeds credential authority limit"));
+    };
+    // Rebuild the final framing first: the authority and the origin must see the same body.
+    let mut outbound_headers = crate::l7::rest::strip_header(&buffered.headers, "authorization")?;
+    // Cookies and proxy authentication are not visible to the broker and could supply a
+    // different identity even after it chose the only authorized credential for this send.
+    for name in ["cookie", "proxy-authorization"] {
+        outbound_headers = crate::l7::rest::strip_header(&outbound_headers, name)?;
+    }
+    let mut request = crate::l7::rest::rebuild_request_with_buffered_body(
+        &req,
+        &outbound_headers,
+        &buffered.body,
+        &[],
+    )?;
+    let headers = safe_middleware_headers(&buffered.headers)?;
+    let query = raw_query_from_request_headers(&buffered.headers)?;
+    let input = middleware_request_input_with_id(
+        &openshell_ocsf::ctx::ctx(),
+        ctx.request_scheme(),
+        &request,
+        ctx,
+        headers.visible,
+        headers.connection_nominated,
+        query,
+        buffered.body,
+        request_id,
+    );
+    let (token, expires_at) = broker.resolve_credential(input).await?;
+    engine.generation_guard().ensure_current()?;
+    if let Some(token) = token {
+        request.raw_header =
+            crate::l7::token_grant_injection::inject_broker_bearer(&request.raw_header, &token)?;
+    }
+    Ok((request, expires_at))
+}
+
 fn middleware_request_input_with_id(
     sandbox: &openshell_ocsf::EventContext,
     scheme: &str,

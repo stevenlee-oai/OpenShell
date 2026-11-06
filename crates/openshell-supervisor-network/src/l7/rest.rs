@@ -884,7 +884,7 @@ where
     U: AsyncRead + AsyncWrite + Unpin,
 {
     relay_http_request_with_response_middleware_guarded_observed(
-        req, client, upstream, options, None, None,
+        req, client, upstream, options, None, None, None,
     )
     .await
 }
@@ -896,12 +896,17 @@ pub(crate) async fn relay_http_request_with_response_middleware_guarded_observed
     options: RelayRequestOptions<'_>,
     response_middleware: Option<HttpResponseMiddlewareRelay<'_>>,
     observer: Option<&EndpointObserver>,
+    send_deadline: Option<std::time::SystemTime>,
 ) -> Result<RelayOutcome>
 where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut observed_upstream = ObservedUpstream { upstream, observer };
+    let mut observed_upstream = ObservedUpstream {
+        upstream,
+        observer,
+        send_deadline,
+    };
     let upstream = &mut observed_upstream;
     ensure_credential_generation_current(options)?;
     let header_end = req
@@ -1294,6 +1299,7 @@ fn ensure_body_generation_current(options: RelayRequestOptions<'_>) -> Result<()
 /// Once a valid response status consumes the observation token, later stream
 /// failures are ignored and cannot overwrite the endpoint's first network result.
 struct ObservedUpstream<'a, U> {
+    send_deadline: Option<std::time::SystemTime>,
     upstream: &'a mut U,
     observer: Option<&'a EndpointObserver>,
 }
@@ -1322,7 +1328,19 @@ impl<U: AsyncWrite + Unpin> AsyncWrite for ObservedUpstream<'_, U> {
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let this = self.get_mut();
+        if this
+            .send_deadline
+            .is_some_and(|deadline| deadline <= std::time::SystemTime::now())
+        {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request credential authorization expired before dispatch",
+            )));
+        }
         let result = std::pin::Pin::new(&mut *this.upstream).poll_write(cx, buf);
+        if matches!(result, std::task::Poll::Ready(Ok(n)) if n > 0) {
+            this.send_deadline = None;
+        }
         if matches!(result, std::task::Poll::Ready(Err(_)))
             && let Some(observer) = this.observer
         {
@@ -2269,7 +2287,7 @@ fn set_content_length(headers: &[u8], len: usize) -> Result<Vec<u8>> {
     Ok(out.into_bytes())
 }
 
-fn strip_header(headers: &[u8], strip_name: &str) -> Result<Vec<u8>> {
+pub(super) fn strip_header(headers: &[u8], strip_name: &str) -> Result<Vec<u8>> {
     let header_str =
         std::str::from_utf8(headers).map_err(|_| miette!("HTTP headers contain invalid UTF-8"))?;
     let mut out = String::with_capacity(header_str.len());
@@ -6248,6 +6266,7 @@ mod tests {
                     },
                     None,
                     Some(&observer),
+                    None,
                 ),
             )
             .await
@@ -6481,6 +6500,7 @@ mod tests {
             let mut upstream = ObservedUpstream {
                 upstream: &mut response,
                 observer: Some(&observer),
+                send_deadline: None,
             };
             let mut client = Vec::new();
             relay_response(

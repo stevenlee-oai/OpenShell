@@ -6,6 +6,7 @@ use openshell_core::middleware::{
     HttpRequestView, HttpResponseResultStream, SupervisorMiddlewareEndpoint,
     WebSocketResponseStream,
 };
+use openshell_core::proto::middleware::v1::http_request_credential_client::HttpRequestCredentialClient;
 use openshell_core::proto::middleware::v1::http_response_pre_return_client::HttpResponsePreReturnClient;
 use openshell_core::proto::middleware::v1::supervisor_middleware_client::SupervisorMiddlewareClient;
 use openshell_core::proto::{
@@ -85,6 +86,16 @@ impl GrpcMiddlewareService {
     }
 
     /// Materialize an owned protobuf evaluation immediately before transport.
+    pub async fn resolve_http_credential(
+        &self,
+        request: HttpRequestEvaluation,
+    ) -> std::result::Result<Response<openshell_core::proto::HttpRequestCredentialResult>, Status>
+    {
+        self.service
+            .resolve_http_credential(Request::new(request))
+            .await
+    }
+
     pub async fn evaluate_http_request(
         &self,
         request: HttpRequestView<'_>,
@@ -123,6 +134,7 @@ impl GrpcMiddlewareService {
 pub struct RemoteMiddlewareService {
     client: SupervisorMiddlewareClient<ExtensionChannel>,
     response_client: HttpResponsePreReturnClient<ExtensionChannel>,
+    credential_client: HttpRequestCredentialClient<ExtensionChannel>,
 }
 
 impl RemoteMiddlewareService {
@@ -153,6 +165,9 @@ impl RemoteMiddlewareService {
             client: SupervisorMiddlewareClient::new(channel.clone())
                 .max_decoding_message_size(MIDDLEWARE_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MIDDLEWARE_GRPC_MESSAGE_BYTES),
+            credential_client: HttpRequestCredentialClient::new(channel.clone())
+                .max_decoding_message_size(32 * 1024)
+                .max_encoding_message_size(MIDDLEWARE_GRPC_MESSAGE_BYTES),
             response_client: HttpResponsePreReturnClient::new(channel)
                 .max_decoding_message_size(MIDDLEWARE_GRPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MIDDLEWARE_GRPC_MESSAGE_BYTES),
@@ -162,6 +177,14 @@ impl RemoteMiddlewareService {
 
 #[tonic::async_trait]
 impl SupervisorMiddlewareEndpoint for RemoteMiddlewareService {
+    async fn resolve_http_credential(
+        &self,
+        request: Request<HttpRequestEvaluation>,
+    ) -> std::result::Result<Response<openshell_core::proto::HttpRequestCredentialResult>, Status>
+    {
+        self.credential_client.clone().resolve(request).await
+    }
+
     async fn describe(
         &self,
         request: Request<MiddlewareDescribeRequest>,

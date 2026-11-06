@@ -679,6 +679,11 @@ fn parse_header_block(raw_header: &[u8]) -> Result<(&str, usize), TokenGrantFail
     Ok((header_block, header_end))
 }
 
+pub(super) fn inject_broker_bearer(raw_header: &[u8], token: &str) -> miette::Result<Vec<u8>> {
+    inject_header(raw_header, "Authorization", &format!("Bearer {token}"))
+        .map_err(|_| miette::miette!("credential injection rejected malformed HTTP headers"))
+}
+
 fn inject_header(
     raw_header: &[u8],
     header_name: &str,
