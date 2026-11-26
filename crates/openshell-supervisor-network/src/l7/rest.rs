@@ -11301,6 +11301,8 @@ mod tests {
                 (
                     key.clone(),
                     StaticCredentialBinding {
+                        request_policy_provider: String::new(),
+                        request_policy_owners: Vec::new(),
                         credential_identity: format!("fixture:{key}"),
                         workload_credential_handle: String::new(),
                         endpoints: vec![StaticCredentialEndpointBinding {
@@ -11518,6 +11520,8 @@ mod tests {
             HashMap::from([(
                 "GITHUB_TOKEN".into(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     credential_identity: "github".into(),
                     workload_credential_handle: String::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {

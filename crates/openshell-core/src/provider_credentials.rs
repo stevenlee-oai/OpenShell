@@ -18,6 +18,84 @@ use std::sync::{Arc, RwLock};
 
 const MAX_RETAINED_CREDENTIAL_GENERATIONS: usize = 8;
 
+/// Refuse a request-bound policy whose Gateway snapshot omits the owner metadata
+/// required for safe resolution. In particular, an older Gateway must not turn
+/// an overlapping credential policy into legacy unrestricted bindings.
+pub fn validate_request_bound_credential_snapshot(
+    policy: &crate::proto::SandboxPolicy,
+    bindings: &HashMap<String, StaticCredentialBinding>,
+) -> Result<(), StaticCredentialBindingError> {
+    let endpoints: Vec<_> = policy
+        .network_policies
+        .values()
+        .flat_map(|rule| &rule.endpoints)
+        .filter(|endpoint| {
+            endpoint.enforcement
+                == crate::proto::NetworkEnforcementMode::EnforceCredentialBound as i32
+        })
+        .collect();
+    if endpoints
+        .iter()
+        .any(|endpoint| endpoint.token_grant_owner.is_empty())
+    {
+        return Err(binding_error(
+            "request-bound endpoint is missing its Gateway-issued policy owner",
+        ));
+    }
+    for binding in bindings.values() {
+        if binding.request_policy_owners.is_empty() != binding.request_policy_provider.is_empty() {
+            return Err(binding_error(
+                "request-bound credential has incomplete Provider identity",
+            ));
+        }
+        let mut matching_owners = HashSet::new();
+        let mut matching_owned_route = false;
+        for target in &binding.endpoints {
+            for endpoint in endpoints.iter().filter(|endpoint| {
+                endpoint.host.eq_ignore_ascii_case(&target.host)
+                    && (if endpoint.ports.is_empty() {
+                        endpoint.port == target.port
+                    } else {
+                        endpoint.ports.contains(&target.port)
+                    })
+                    && canonical_binding_path(&endpoint.path)
+                        == canonical_binding_path(&target.path)
+            }) {
+                matching_owned_route = true;
+                if endpoint
+                    .credential_binding
+                    .as_ref()
+                    .is_some_and(|item| item.provider == binding.request_policy_provider)
+                {
+                    matching_owners.insert(endpoint.token_grant_owner.as_str());
+                }
+            }
+        }
+        if matching_owned_route && binding.request_policy_owners.is_empty() {
+            return Err(binding_error(
+                "request-bound credential is missing its policy owners",
+            ));
+        }
+        if binding
+            .request_policy_owners
+            .iter()
+            .any(|owner| owner.is_empty() || !matching_owners.contains(owner.as_str()))
+        {
+            return Err(binding_error(
+                "request-bound credential contains an invalid policy owner",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_binding_path(path: &str) -> &str {
+    match path {
+        "" | "**" | "/**" => "/**",
+        path => path,
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCredentialSnapshot {
     /// Identifies this local installation, including repairs at the same revision.
@@ -225,6 +303,7 @@ struct CompiledStaticCredentialBinding {
     endpoints: Vec<CompiledStaticCredentialEndpointBinding>,
     credential_identity: String,
     workload_credential_handle: String,
+    request_policy_owners: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -661,6 +740,38 @@ impl ProviderCredentialState {
         self.resolver_for_endpoint_with_revision(host, port, path).0
     }
 
+    /// Whether this endpoint has static credentials that require request-owner admission.
+    #[must_use]
+    pub fn has_request_policy_bound_credentials_for_endpoint(
+        &self,
+        host: &str,
+        port: u16,
+        path: &str,
+    ) -> bool {
+        let request_path = path.split_once('?').map_or(path, |(path, _)| path);
+        let Ok(request_path) = crate::secrets::redact_target_for_policy(request_path) else {
+            return false;
+        };
+        let normalized_host = host.to_ascii_lowercase();
+        let host_labels = normalized_host.split('.').collect::<Vec<_>>();
+        self.inner
+            .read()
+            .expect("provider credential state poisoned")
+            .static_credential_bindings
+            .values()
+            .any(|binding| {
+                !binding.request_policy_owners.is_empty()
+                    && binding.endpoints.iter().any(|endpoint| {
+                        static_credential_endpoint_matches(
+                            endpoint,
+                            &host_labels,
+                            port,
+                            &request_path,
+                        )
+                    })
+            })
+    }
+
     /// Resolve provider placeholders for one endpoint and return the provider
     /// revision observed from the same locked state snapshot.
     ///
@@ -691,6 +802,23 @@ impl ProviderCredentialState {
         Option<Arc<crate::secrets::body::BodyCredentialClassifier>>,
         u64,
     ) {
+        self.resolver_and_body_classifier_for_endpoint_with_owners(host, port, path, None, false)
+    }
+
+    /// Resolve only static credentials whose own request policy admitted the request.
+    #[must_use]
+    pub fn resolver_and_body_classifier_for_endpoint_with_owners(
+        &self,
+        host: &str,
+        port: u16,
+        path: &str,
+        admitted_owners: Option<&HashSet<String>>,
+        require_credential_selection: bool,
+    ) -> (
+        Option<Arc<SecretResolver>>,
+        Option<Arc<crate::secrets::body::BodyCredentialClassifier>>,
+        u64,
+    ) {
         let request_path = path.split_once('?').map_or(path, |(path, _)| path);
         let request_path = crate::secrets::redact_target_for_policy(request_path);
         let normalized_host = host.to_ascii_lowercase();
@@ -710,9 +838,17 @@ impl ProviderCredentialState {
             .static_credential_bindings
             .iter()
             .filter(|(_, binding)| {
-                binding.endpoints.iter().any(|endpoint| {
-                    static_credential_endpoint_matches(endpoint, &host_labels, port, &request_path)
-                })
+                (binding.request_policy_owners.is_empty()
+                    || admitted_owners
+                        .is_some_and(|owners| !owners.is_disjoint(&binding.request_policy_owners)))
+                    && binding.endpoints.iter().any(|endpoint| {
+                        static_credential_endpoint_matches(
+                            endpoint,
+                            &host_labels,
+                            port,
+                            &request_path,
+                        )
+                    })
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -738,37 +874,62 @@ impl ProviderCredentialState {
                     .collect(),
             ))
         });
-        let resolver = inner.combined_resolver.as_ref().map(|resolver| {
-            let revision_fallback_allowed_revisions = inner
-                .static_credential_identity_epochs
-                .iter()
-                .filter(|(key, epoch)| {
-                    allowed.contains(*key)
-                        && inner
-                            .static_credential_bindings
-                            .get(*key)
-                            .is_some_and(|binding| binding.credential_identity == epoch.identity)
-                })
-                .map(|(key, epoch)| (key.clone(), epoch.revisions.clone()))
-                .collect();
-            let scoped = resolver
-                .as_ref()
-                .clone()
-                .with_placements(
+        let resolver = inner
+            .combined_resolver
+            .as_ref()
+            .map(|resolver| {
+                let revision_fallback_allowed_revisions =
                     inner
-                        .static_credential_bindings
+                        .static_credential_identity_epochs
                         .iter()
-                        .map(|(key, binding)| (key.clone(), binding.placement.clone()))
-                        .collect(),
-                )
-                .scoped_to_env_keys(
-                    &inner.known_static_credential_keys,
-                    &allowed,
-                    revision_fallback_allowed_revisions,
-                );
-            // Attributed to the same snapshot as `revision` above.
-            Arc::new(self.track_resolver(scoped, &inner))
-        });
+                        .filter(|(key, epoch)| {
+                            allowed.contains(*key)
+                                && inner.static_credential_bindings.get(*key).is_some_and(
+                                    |binding| binding.credential_identity == epoch.identity,
+                                )
+                        })
+                        .map(|(key, epoch)| (key.clone(), epoch.revisions.clone()))
+                        .collect();
+                let scoped = resolver
+                    .as_ref()
+                    .clone()
+                    .with_placements(
+                        inner
+                            .static_credential_bindings
+                            .iter()
+                            .map(|(key, binding)| (key.clone(), binding.placement.clone()))
+                            .collect(),
+                    )
+                    .scoped_to_env_keys(
+                        &inner.known_static_credential_keys,
+                        &allowed,
+                        revision_fallback_allowed_revisions,
+                    );
+                // Attributed to the same snapshot as `revision` above.
+                let scoped = self.track_resolver(scoped, &inner);
+                Arc::new(if require_credential_selection {
+                    let admitted_bound_keys = allowed
+                        .iter()
+                        .filter(|key| {
+                            inner
+                                .static_credential_bindings
+                                .get(*key)
+                                .is_some_and(|binding| !binding.request_policy_owners.is_empty())
+                        })
+                        .cloned()
+                        .collect();
+                    scoped.requiring_credential_selection(admitted_bound_keys)
+                } else {
+                    scoped
+                })
+            })
+            .or_else(|| {
+                require_credential_selection.then(|| {
+                    Arc::new(
+                        SecretResolver::default().requiring_credential_selection(HashSet::new()),
+                    )
+                })
+            });
         (resolver, classifier, revision)
     }
 
@@ -1447,6 +1608,7 @@ fn compile_static_credential_bindings(
                     placement,
                     credential_identity: binding.credential_identity,
                     workload_credential_handle: binding.workload_credential_handle,
+                    request_policy_owners: binding.request_policy_owners.into_iter().collect(),
                 },
             ))
         })
@@ -1782,6 +1944,8 @@ mod tests {
 
     fn binding(host: &str, port: u32, path: &str) -> StaticCredentialBinding {
         StaticCredentialBinding {
+            request_policy_provider: String::new(),
+            request_policy_owners: Vec::new(),
             endpoints: vec![StaticCredentialEndpointBinding {
                 host: host.to_string(),
                 port,

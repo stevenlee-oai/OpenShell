@@ -37,8 +37,8 @@ use openshell_core::mcp::{
 };
 use openshell_core::proto::{
     FilesystemPolicy, GraphqlOperation, L7Allow, L7DenyRule, L7QueryMatcher, L7Rule,
-    LandlockPolicy, McpOptions, NetworkBinary, NetworkEndpoint, NetworkPolicyRule, ProcessPolicy,
-    SandboxPolicy,
+    LandlockPolicy, McpOptions, NetworkBinary, NetworkEndpoint, NetworkEnforcementMode,
+    NetworkPolicyRule, ProcessPolicy, SandboxPolicy,
 };
 use prost::Message;
 
@@ -1858,6 +1858,7 @@ fn validate_sandbox_policy_with_mcp_presence(
     // receive stable validation errors for equivalent policy inputs.
     let mut network_policies: Vec<_> = policy.network_policies.iter().collect();
     network_policies.sort_by_key(|(name, _)| *name);
+    let mut credential_binding_modes = HashMap::<&str, bool>::new();
 
     // Check network policy endpoint hosts for TLD wildcards.
     for (key, rule) in network_policies {
@@ -1978,6 +1979,54 @@ fn validate_sandbox_policy_with_mcp_presence(
                     .unwrap_or(false),
             };
             let mut l7_errors = validate_l7_endpoint_semantics(&fields);
+            let credential_bound =
+                ep.enforcement == NetworkEnforcementMode::EnforceCredentialBound as i32;
+            if credential_bound {
+                if ep
+                    .credential_binding
+                    .as_ref()
+                    .is_none_or(|binding| binding.provider.trim().is_empty())
+                {
+                    l7_errors.push(
+                        "enforce-credential-bound requires credential_binding.provider".to_string(),
+                    );
+                }
+                if !matches!(
+                    L7Protocol::parse(&ep.protocol),
+                    Some(L7Protocol::Rest | L7Protocol::Mcp)
+                ) {
+                    l7_errors.push(
+                        "enforce-credential-bound requires rest or mcp inspection".to_string(),
+                    );
+                }
+                if ep.host.contains('*') || ep.host.contains('?') || ep.host.contains('[') {
+                    l7_errors.push("enforce-credential-bound requires an exact host".to_string());
+                }
+                if ep.tls == openshell_core::proto::NetworkTlsMode::Skip as i32
+                    || ep.allow_uninspected_credentials
+                    || ep.websocket_credential_rewrite
+                    || ep.request_body_credential_rewrite
+                    || !ep.credential_signing.is_empty()
+                {
+                    l7_errors.push("enforce-credential-bound cannot use uninspected credentials, credential signing, or body/WebSocket rewriting".to_string());
+                }
+            }
+            if let Some(binding) = &ep.credential_binding {
+                match credential_binding_modes.entry(binding.provider.as_str()) {
+                    std::collections::hash_map::Entry::Occupied(entry)
+                        if *entry.get() != credential_bound =>
+                    {
+                        l7_errors.push(format!(
+                            "provider '{}' cannot mix ordinary and enforce-credential-bound endpoints",
+                            binding.provider
+                        ));
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(credential_bound);
+                    }
+                    _ => {}
+                }
+            }
             l7_errors.extend(validate_endpoint_mode_values(
                 ep.tls,
                 ep.enforcement,
@@ -6065,6 +6114,46 @@ network_policies:
         assert_eq!(proto1, proto2);
         assert!(yaml_out.contains("credential_binding:"));
         assert!(yaml_out.contains("provider: work-gcp"));
+    }
+
+    #[test]
+    fn credential_bound_enforcement_round_trips_and_requires_a_concrete_provider() {
+        let yaml = "version: 1\nnetwork_policies:\n  account:\n    endpoints:\n      - host: mcp.example.com\n        port: 443\n        protocol: mcp\n        enforcement: enforce-credential-bound\n        mcp: {allow_all_known_mcp_methods: true}\n        credential_binding: {provider: account-a}\n";
+        let policy = parse_sandbox_policy(yaml).expect("account-bound YAML should parse");
+        let endpoint = &policy.network_policies["account"].endpoints[0];
+        assert_eq!(
+            endpoint.enforcement,
+            NetworkEnforcementMode::EnforceCredentialBound as i32
+        );
+        validate_sandbox_policy(&policy).expect("account-bound endpoint should validate");
+        let serialized = serialize_sandbox_policy(&policy).expect("serialize account-bound YAML");
+        assert!(serialized.contains("enforce-credential-bound"));
+        assert_eq!(parse_sandbox_policy(&serialized).unwrap(), policy);
+
+        let mut mixed_case = policy.clone();
+        mixed_case
+            .network_policies
+            .get_mut("account")
+            .unwrap()
+            .endpoints[0]
+            .protocol = "MCP".to_string();
+        validate_sandbox_policy(&mixed_case).expect("established protocol aliases stay valid");
+
+        let mut missing = policy.clone();
+        missing
+            .network_policies
+            .get_mut("account")
+            .unwrap()
+            .endpoints[0]
+            .credential_binding = None;
+        assert!(
+            validate_sandbox_policy(&missing)
+                .unwrap_err()
+                .iter()
+                .any(|violation| violation
+                    .to_string()
+                    .contains("requires credential_binding.provider"))
+        );
     }
 
     #[test]

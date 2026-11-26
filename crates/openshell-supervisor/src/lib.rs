@@ -2241,10 +2241,13 @@ async fn flush_activity_to_gateway(
 
 /// Versioned policy capabilities compiled into this supervisor.
 fn supported_policy_capabilities() -> Vec<String> {
-    openshell_core::extension_protocol::capabilities_if(
+    let mut capabilities = openshell_core::extension_protocol::capabilities_if(
         openshell_core::extension_protocol::POLICY_CEDAR_V1,
         cfg!(feature = "experimental"),
-    )
+    );
+    capabilities
+        .push(openshell_core::extension_protocol::POLICY_REQUEST_BOUND_CREDENTIALS_V1.to_string());
+    capabilities
 }
 
 /// Minimum read-only paths required for a proxy-mode sandbox child process to
@@ -3472,6 +3475,11 @@ fn prepare_startup_configuration(
     // it builds, as a reload validates while staging. A Cedar policy builds
     // no OPA engine (see `openshell_supervisor_network::policy_engine`), and
     // a build without Cedar support rejects it here.
+    openshell_core::provider_credentials::validate_request_bound_credential_snapshot(
+        policy,
+        &provider.static_credential_bindings,
+    )
+    .map_err(|error| miette::miette!("Provider credential bindings are invalid: {error}"))?;
     let engine = policy_runtime::from_proto(policy)?;
     let mut process_policy = SandboxPolicy::try_from(policy.clone())?;
     let filesystem = engine.effective_filesystem(policy)?;

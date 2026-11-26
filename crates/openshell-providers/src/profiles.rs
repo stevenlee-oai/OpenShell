@@ -2876,6 +2876,14 @@ pub fn validate_catalog_profiles(
                     msg,
                 ));
             }
+            if endpoint.enforcement == "enforce-credential-bound" {
+                diagnostics.push(ProfileValidationDiagnostic::error(
+                    source,
+                    profile_id,
+                    format!("endpoints[{index}]"),
+                    "enforce-credential-bound is only valid on a sandbox policy endpoint with credential_binding.provider",
+                ));
+            }
             for msg in validate_explicit_tcp_additional_fields(
                 &endpoint.protocol,
                 &additional_l7_profile_fields(endpoint),
@@ -4019,6 +4027,8 @@ credentials:
         let binding = |profile: &ProviderTypeProfile| StaticCredentialBinding {
             credential_identity: profile.id.clone(),
             workload_credential_handle: String::new(),
+            request_policy_owners: Vec::new(),
+            request_policy_provider: String::new(),
             endpoints: profile
                 .to_proto()
                 .endpoints
@@ -7085,6 +7095,20 @@ endpoints:
         assert!(message.contains("unknown tls value 'skp'"));
         assert!(message.contains("unknown enforcement value 'enforc'"));
         assert!(message.contains("unknown access value 'read-wirte'"));
+    }
+
+    #[test]
+    fn validate_rejects_account_bound_mode_in_provider_profiles() {
+        let profile = parse_profile_yaml(
+            "id: account-mode\ndisplay_name: Account mode\nendpoints:\n  - host: mcp.example.com\n    port: 443\n    protocol: mcp\n    enforcement: enforce-credential-bound\n    mcp: {allow_all_known_mcp_methods: true}\n",
+        )
+        .expect("profile YAML parses");
+        let diagnostics = validate_profile_set(&[("account.yaml".to_string(), profile)]);
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("only valid on a sandbox policy endpoint")
+        }));
     }
 
     #[test]

@@ -615,6 +615,48 @@ network_policies:
 
 ---
 
+## Example 7: Independent MCP Accounts at One Endpoint
+
+Two attached endpointless providers use distinct credential keys:
+`ACCOUNT_A_TOKEN` and `ACCOUNT_B_TOKEN`. Account A can search; account B can
+search and send. Each request must carry exactly one authorized placeholder.
+
+```yaml
+network_policies:
+  account_a:
+    binaries: [{path: /usr/bin/python3}]
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce-credential-bound
+        credential_binding: {provider: account-a}
+        mcp: {allow_all_known_mcp_methods: true}
+        rules:
+          - allow: {tool: search}
+  account_b:
+    binaries: [{path: /usr/bin/python3}]
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce-credential-bound
+        credential_binding: {provider: account-b}
+        mcp: {allow_all_known_mcp_methods: true}
+        rules:
+          - allow: {tool: {any: [search, send]}}
+```
+
+`allow_all_known_mcp_methods` permits `initialize`,
+`notifications/initialized`, and `tools/list` for an ordinary MCP client. The
+tool rules restrict `tools/call`: account A cannot call `send`, and account B's
+rule cannot authorize account A's placeholder. To avoid permitting other core
+methods, omit the option and explicitly allow the required lifecycle methods
+and `tools/call` names. Do not reuse credential keys, even for expired
+credentials, or define conflicting rules for the same provider and endpoint.
+
 ## File Operation Examples (update existing / create new)
 
 ## Private IP Access Examples (allowed_ips)

@@ -248,13 +248,73 @@ When upgrading from revision-scoped refresh placeholders to stable refresh
 handles, restart each existing workload once so it receives the new placeholder.
 Later access-token rotations do not require workload restarts.
 
+### Independent Accounts on One Endpoint
+
+Use `enforcement: enforce-credential-bound` when two attached providers need
+different permissions at the same inspected endpoint. Each provider must use an
+endpointless profile and a distinct credential environment key, such as
+`ACCOUNT_A_TOKEN` and `ACCOUNT_B_TOKEN`. Do not reuse an environment key across
+providers, even if one credential has expired or is temporarily unavailable.
+The client must send exactly one authorized account placeholder in the
+credential's declared location. OpenShell rejects requests with no selected
+account, multiple account placeholders, or a placeholder that is not authorized
+for the endpoint before forwarding them.
+
+For example, `account-a` can search, while `account-b` can search and send:
+
+```yaml showLineNumbers={false}
+network_policies:
+  account_a:
+    binaries: [{path: /usr/bin/python3}]
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce-credential-bound
+        credential_binding: {provider: account-a}
+        mcp: {allow_all_known_mcp_methods: true}
+        rules:
+          - allow: {tool: search}
+  account_b:
+    binaries: [{path: /usr/bin/python3}]
+    endpoints:
+      - host: mcp.example.com
+        port: 443
+        path: /mcp
+        protocol: mcp
+        enforcement: enforce-credential-bound
+        credential_binding: {provider: account-b}
+        mcp: {allow_all_known_mcp_methods: true}
+        rules:
+          - allow: {tool: {any: [search, send]}}
+```
+
+An attempt to call `send` with account A's placeholder is rejected before
+forwarding. Account B's permission cannot authorize account A's credential.
+`allow_all_known_mcp_methods` permits the ordinary MCP lifecycle, including
+`initialize`, `notifications/initialized`, and `tools/list`; the explicit tool
+rules still limit `tools/call`. Without that option, add allow rules for those
+lifecycle methods as well as each permitted `tools/call`.
+Explicit deny rules still take precedence across matching endpoints. Keep the
+mode on account A if account B is removed.
+
+This mode requires a supporting Gateway and supervisor. It applies to explicit
+REST and MCP bindings in YAML sandbox policy, not provider profile endpoints or
+Cedar policy. All endpoints bound to the same provider must use the same mode;
+signing, body rewriting, and WebSocket rewriting are unsupported. Overlapping
+account bindings must have the same exact destination and compatible inspection
+settings; an ordinary credential binding cannot overlap them.
+Two rules for the same provider and exact endpoint cannot disagree on allowed
+operations, deny rules, or binaries.
+
 ## Roadmap
 
 The following provider profile design items are not part of the current behavior:
 
 | Roadmap item | Current behavior |
 |---|---|
-| Binary-scoped credential injection | Static placeholder resolution is endpoint-scoped. Dynamic grants in single-route REST and multi-route inspection also require admission by their owning endpoint's policy, including its binary restrictions. L4-only credential forwarding retains endpoint-selector matching. |
+| Binary-scoped credential injection | Ordinary static placeholder resolution is endpoint-scoped. Static `enforce-credential-bound` bindings and dynamic grants in inspected routes also require admission by their owning endpoint's policy, including its binary restrictions. L4-only credential forwarding retains endpoint-selector matching. |
 | Credential verification on create | `openshell provider create` does not yet probe provider verification endpoints or expose `--no-verify`. |
 | Automatic credential scope extraction | OpenShell does not yet inspect upstream provider responses to discover credential scopes. |
 | Policy prover integration | OpenShell does not yet run the policy prover automatically on sandbox startup or block startup based on prover findings. |

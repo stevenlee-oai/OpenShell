@@ -108,6 +108,8 @@ pub enum EnforcementSetting {
     Default,
     /// Deny violations.
     Enforce,
+    /// Deny violations and restrict static credentials to their admitting owner.
+    EnforceCredentialBound,
     /// Log violations and forward the request.
     Audit,
     /// A value the runtime does not accept.
@@ -119,6 +121,7 @@ impl From<&str> for EnforcementSetting {
         match label {
             "" => Self::Default,
             "enforce" => Self::Enforce,
+            "enforce-credential-bound" => Self::EnforceCredentialBound,
             "audit" => Self::Audit,
             _ => Self::Unknown,
         }

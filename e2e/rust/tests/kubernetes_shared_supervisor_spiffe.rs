@@ -979,6 +979,7 @@ impl BrokerProbe {
             sandbox_id: sandbox_id.to_string(),
             supports_static_credential_bindings: true,
             supports_stable_placeholder_environment_keys: true,
+            supports_request_policy_bound_credentials: true,
         });
         let environment = probe
             .client

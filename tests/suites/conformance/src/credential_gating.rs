@@ -27,6 +27,13 @@ const BASH: &str = "/usr/bin/bash";
 const TOKEN_ENV: &str = "E2E_GATING_TOKEN";
 const TEST_SECRET: &str = "e2e-gating-secret-value";
 const PLACEHOLDER_PREFIX: &str = "openshell:resolve:env:";
+const MCP_ACCOUNT_A: &str = "E2E_MCP_ACCOUNT_A";
+const MCP_ACCOUNT_B: &str = "E2E_MCP_ACCOUNT_B";
+const MCP_SECRET_A: &str = "e2e-mcp-account-a";
+const MCP_SECRET_B: &str = "e2e-mcp-account-b";
+const MCP_CLIENT_IMAGE: &str = "openshell-mcp-conformance-client:local";
+const MCP_NODE_BINARIES: &[&str] = &["/usr/local/bin/node", "/usr/bin/node"];
+const MCP_ACCOUNT_CLIENT: &str = include_str!("mcp_account_client.mjs");
 
 const TOKEN_PRESENCE: &str = r#"if [ "${E2E_GATING_TOKEN+x}" != x ]; then
   echo TOKEN_ABSENT
@@ -344,6 +351,393 @@ async fn profile_endpoints_bind_static_credentials(cx: &mut Context) -> testkit:
         );
     }
     Ok(())
+}
+
+/// Two accounts at one inspected MCP endpoint keep their own tool rules and
+/// bearer values, including after one account is withdrawn.
+#[testkit::test]
+async fn account_bound_mcp_tool_policies_are_isolated(cx: &mut Context) -> testkit::Result {
+    let server = HttpRecorder::serve(mcp_account_fixture).await?;
+    let (providers, policy) = mcp_accounts(cx, server.port, PYTHON_BINARIES).await?;
+    let sandbox = cx
+        .python_sandbox("multi", policy.clone())
+        .providers(providers.iter().map(String::as_str))
+        .create_ready()
+        .await?;
+    let placeholder_a = sandbox
+        .exec(["printenv", MCP_ACCOUNT_A])
+        .await?
+        .success()?
+        .stdout;
+    let placeholder_b = sandbox
+        .exec(["printenv", MCP_ACCOUNT_B])
+        .await?
+        .success()?
+        .stdout;
+    let placeholder_a = placeholder_a.trim();
+    let placeholder_b = placeholder_b.trim();
+    testkit::ensure!(
+        placeholder_a.starts_with(PLACEHOLDER_PREFIX)
+            && placeholder_b.starts_with(PLACEHOLDER_PREFIX)
+            && placeholder_a != placeholder_b,
+        "each account must receive its own nonsecret placeholder"
+    );
+
+    async fn call(
+        sandbox: &Sandbox,
+        port: u16,
+        placeholder: &str,
+        tool: &str,
+    ) -> Result<clients::Http> {
+        http(
+            sandbox,
+            TEST_HOST,
+            port,
+            &clients::Request::new("POST", "/mcp")
+                .header("Authorization", format!("Bearer {placeholder}"))
+                .header("Content-Type", "application/json")
+                .header("MCP-Protocol-Version", "2025-11-25")
+                .body(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": {}}}).to_string()),
+        )
+        .await
+    }
+
+    for (placeholder, tool, secret) in [
+        (placeholder_a, "search", MCP_SECRET_A),
+        (placeholder_b, "search", MCP_SECRET_B),
+        (placeholder_b, "send", MCP_SECRET_B),
+    ] {
+        let reply = call(&sandbox, server.port, placeholder, tool).await?;
+        testkit::ensure!(reply.status() == Some(200), "{tool} should be permitted");
+        let requests = server.requests();
+        let request = requests
+            .last()
+            .ok_or_else(|| Error::msg("allowed call did not reach upstream"))?;
+        testkit::ensure!(
+            request.header("authorization").as_deref() == Some(format!("Bearer {secret}").as_str())
+                && serde_json::from_str::<serde_json::Value>(&request.body)?["params"]["name"]
+                    == tool,
+            "the recipient must see the chosen account's bearer and tool"
+        );
+    }
+    let before_denied = server.requests().len();
+    testkit::ensure!(
+        before_denied == 3,
+        "exactly three allowed calls must reach upstream"
+    );
+    let reply = call(&sandbox, server.port, placeholder_a, "send").await?;
+    testkit::ensure!(reply.status() == Some(403), "account A cannot send");
+    testkit::ensure!(
+        server.requests().len() == before_denied,
+        "account A's disabled tool must not reach upstream"
+    );
+
+    let missing = http(
+        &sandbox,
+        TEST_HOST,
+        server.port,
+        &clients::Request::new("POST", "/mcp")
+            .header("Content-Type", "application/json")
+            .header("MCP-Protocol-Version", "2025-11-25")
+            .body(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search", "arguments": {}}}).to_string()),
+    )
+    .await?;
+    let unknown = call(
+        &sandbox,
+        server.port,
+        "openshell:resolve:env:E2E_MCP_UNKNOWN",
+        "search",
+    )
+    .await?;
+    testkit::ensure!(
+        missing.status() == Some(403) && unknown.status() == Some(403),
+        "missing and unknown accounts must be denied"
+    );
+    testkit::ensure!(
+        server.requests().len() == before_denied,
+        "an unselected account reached upstream"
+    );
+
+    let mut withdrawn = policy;
+    withdrawn.network_policies.remove("account_a");
+    policy::set(&sandbox, &withdrawn).await?;
+    let reply = call(&sandbox, server.port, placeholder_a, "search").await?;
+    testkit::ensure!(
+        reply.status() == Some(403),
+        "withdrawn account A cannot search"
+    );
+    testkit::ensure!(
+        server.requests().len() == before_denied,
+        "withdrawn account A must not reach upstream"
+    );
+    let reply = call(&sandbox, server.port, placeholder_b, "send").await?;
+    testkit::ensure!(
+        reply.status() == Some(200),
+        "account B must remain available"
+    );
+    let requests = server.requests();
+    testkit::ensure!(
+        requests.len() == before_denied + 1
+            && requests
+                .last()
+                .and_then(|request| request.header("authorization"))
+                .as_deref()
+                == Some(format!("Bearer {MCP_SECRET_B}").as_str()),
+        "account B must keep its bearer after account A is withdrawn"
+    );
+    Ok(())
+}
+
+/// The upstream conformance image contains the official MCP SDK. This focused
+/// case is opt-in because the ordinary conformance images do not contain it.
+#[testkit::test]
+#[ignore = "requires the pinned upstream MCP conformance client image; see e2e/mcp-conformance.sh"]
+async fn account_bound_mcp_sdk_client_isolates_accounts(cx: &mut Context) -> testkit::Result {
+    let server = HttpRecorder::serve(mcp_account_fixture).await?;
+    let (providers, mut policy) = mcp_accounts(cx, server.port, MCP_NODE_BINARIES).await?;
+    policy
+        .filesystem
+        .as_mut()
+        .ok_or_else(|| Error::msg("base policy lacks a filesystem policy"))?
+        .read_only
+        .push("/opt".into());
+    let image = std::env::var("OPENSHELL_MCP_CONFORMANCE_CLIENT_IMAGE")
+        .unwrap_or_else(|_| MCP_CLIENT_IMAGE.to_string());
+    let sandbox = cx
+        .sandbox("sdk")
+        .image(image)
+        .command(["sleep", "infinity"])
+        .policy(policy.clone())
+        .providers(providers.iter().map(String::as_str))
+        .create_ready()
+        .await?;
+    let placeholder_a = sandbox
+        .exec(["printenv", MCP_ACCOUNT_A])
+        .await?
+        .success()?
+        .stdout;
+    let placeholder_b = sandbox
+        .exec(["printenv", MCP_ACCOUNT_B])
+        .await?
+        .success()?
+        .stdout;
+    testkit::ensure!(
+        placeholder_a.trim().starts_with(PLACEHOLDER_PREFIX)
+            && placeholder_b.trim().starts_with(PLACEHOLDER_PREFIX)
+            && placeholder_a.trim() != placeholder_b.trim(),
+        "each account must receive a unique placeholder, not a bearer"
+    );
+
+    run_mcp_sdk(
+        &sandbox,
+        server.port,
+        MCP_ACCOUNT_A,
+        &[("search", true), ("send", false)],
+        false,
+    )
+    .await?;
+    run_mcp_sdk(
+        &sandbox,
+        server.port,
+        MCP_ACCOUNT_B,
+        &[("search", true), ("send", true)],
+        false,
+    )
+    .await?;
+    let requests = server.requests();
+    for secret in [MCP_SECRET_A, MCP_SECRET_B] {
+        let authorization = format!("Bearer {secret}");
+        let methods: Vec<_> = requests
+            .iter()
+            .filter(|request| {
+                request.header("authorization").as_deref() == Some(authorization.as_str())
+            })
+            .filter_map(|request| serde_json::from_str::<serde_json::Value>(&request.body).ok())
+            .map(|request| request["method"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        testkit::ensure!(
+            methods.starts_with(&[
+                "initialize".into(),
+                "notifications/initialized".into(),
+                "tools/list".into()
+            ]),
+            "account {secret} did not initialize and discover through its own credential: {methods:?}"
+        );
+        testkit::ensure!(
+            requests
+                .iter()
+                .filter(|request| request.method() == "GET"
+                    && request.header("authorization").as_deref() == Some(authorization.as_str()))
+                .count()
+                == 1,
+            "account {secret} did not open its own optional MCP event stream"
+        );
+    }
+    let calls: Vec<_> = requests
+        .iter()
+        .filter_map(|request| {
+            let body = serde_json::from_str::<serde_json::Value>(&request.body).ok()?;
+            (body["method"] == "tools/call").then(|| {
+                (
+                    request.header("authorization"),
+                    body["params"]["name"].clone(),
+                )
+            })
+        })
+        .collect();
+    testkit::ensure!(
+        calls
+            == vec![
+                (Some(format!("Bearer {MCP_SECRET_A}")), json!("search")),
+                (Some(format!("Bearer {MCP_SECRET_B}")), json!("search")),
+                (Some(format!("Bearer {MCP_SECRET_B}")), json!("send")),
+            ],
+        "disabled tool reached upstream or a credential was mixed: {calls:?}"
+    );
+    let before_denied = requests.len();
+    for account in ["missing", "unknown"] {
+        run_mcp_sdk(&sandbox, server.port, account, &[], true).await?;
+        testkit::ensure!(
+            server.requests().len() == before_denied,
+            "{account} account reached upstream"
+        );
+    }
+
+    policy.network_policies.remove("account_a");
+    policy::set(&sandbox, &policy).await?;
+    // A process may retain A's old placeholder after its environment entry is removed.
+    run_mcp_sdk(&sandbox, server.port, placeholder_a.trim(), &[], true).await?;
+    testkit::ensure!(
+        server.requests().len() == before_denied,
+        "withdrawn account reached upstream"
+    );
+    run_mcp_sdk(
+        &sandbox,
+        server.port,
+        MCP_ACCOUNT_B,
+        &[("send", true)],
+        false,
+    )
+    .await?;
+    let after = server.requests();
+    testkit::ensure!(
+        after.len() == before_denied + 5
+            && after[before_denied..]
+                .iter()
+                .all(|request| request.header("authorization").as_deref()
+                    == Some(format!("Bearer {MCP_SECRET_B}").as_str())),
+        "remaining account changed after withdrawal"
+    );
+    Ok(())
+}
+
+async fn run_mcp_sdk(
+    sandbox: &Sandbox,
+    port: u16,
+    account: &str,
+    tools: &[(&str, bool)],
+    expect_denied: bool,
+) -> Result {
+    // Exec prohibits control characters in command arguments. Drop comment
+    // lines and join the readable fixture before passing it to Node.
+    let script = MCP_ACCOUNT_CLIENT
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let url = format!("http://{TEST_HOST}:{port}/mcp");
+    let tools = serde_json::to_string(tools)?;
+    let expected = if expect_denied { "denied" } else { "allowed" };
+    let result = sandbox.exec([
+        "sh", "-c", "cd /opt/mcp-conformance && exec node --input-type=module -e \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"", "sh", &script, &url, account, &tools, expected,
+    ]).await?.success()?;
+    let marker = if expect_denied {
+        "SDK_CONNECT_DENIED"
+    } else {
+        "SDK_CALLS_OK"
+    };
+    testkit::ensure!(
+        result.stdout.lines().any(|line| line == marker),
+        "MCP SDK client did not report {marker}: {}",
+        result.stdout
+    );
+    Ok(())
+}
+
+async fn mcp_accounts(
+    cx: &Context,
+    port: u16,
+    binary_paths: &[&str],
+) -> Result<([String; 2], proto::SandboxPolicy)> {
+    let providers = [cx.name("accta"), cx.name("acctb")];
+    for (name, env, secret) in [
+        (&providers[0], MCP_ACCOUNT_A, MCP_SECRET_A),
+        (&providers[1], MCP_ACCOUNT_B, MCP_SECRET_B),
+    ] {
+        let profile = Profile::new(name)
+            .display_name("E2E MCP account")
+            .credential(bearer_credential("token", env))
+            .binaries(binary_paths.iter().copied())
+            .to_yaml()?;
+        cx.install_provider(name, &profile, &[(env, secret)])
+            .await?;
+    }
+    let binaries: Vec<_> = binary_paths
+        .iter()
+        .map(|path| json!({"path": path}))
+        .collect();
+    let account_rule = |name: &str, provider: &str, tools: &[&str]| {
+        let mut rules = vec![
+            json!({"allow": {"method": "initialize"}}),
+            json!({"allow": {"method": "notifications/initialized"}}),
+            json!({"allow": {"method": "tools/list"}}),
+        ];
+        rules.extend(
+            tools
+                .iter()
+                .map(|tool| json!({"allow": {"method": "tools/call", "tool": tool}})),
+        );
+        json!({"name": name, "endpoints": [{
+            "host": TEST_HOST, "port": port, "path": "/mcp", "protocol": "mcp",
+            "enforcement": "enforce-credential-bound", "mcp": {"versions": ["2025-11-25"]},
+            "rules": rules, "credential_binding": {"provider": provider}
+        }], "binaries": binaries})
+    };
+    let rules = json!({
+        "account_a": account_rule("account_a", &providers[0], &["search"]),
+        "account_b": account_rule("account_b", &providers[1], &["search", "send"]),
+    });
+    Ok((
+        providers,
+        policy::base_with(&format!("network_policies: {rules}\n"))?,
+    ))
+}
+
+fn mcp_account_fixture(request: &Request) -> Response {
+    if request.method() == "GET" {
+        // Streamable HTTP permits a server to decline the optional SSE stream.
+        return Response::new(405);
+    }
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(&request.body) else {
+        return Response::new(400);
+    };
+    let result = match message["method"].as_str() {
+        Some("initialize") => {
+            json!({"protocolVersion": "2025-11-25", "capabilities": {"tools": {}}, "serverInfo": {"name": "openshell-account-test", "version": "1"}})
+        }
+        Some("notifications/initialized") => return Response::new(202),
+        Some("tools/list") => {
+            let tools = ["search", "send"].map(
+                |name| json!({"name": name, "inputSchema": {"type": "object", "properties": {}}}),
+            );
+            json!({"tools": tools})
+        }
+        Some("tools/call") => {
+            json!({"content": [{"type": "text", "text": message["params"]["name"]}]})
+        }
+        _ => return Response::new(400),
+    };
+    Response::json(&json!({"jsonrpc": "2.0", "id": message["id"], "result": result}))
 }
 
 /// Run [`scripts::WEBSOCKET_BINARY_CLIENT`] against `server` in a sandbox with `providers`,

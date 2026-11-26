@@ -132,11 +132,10 @@ async fn provider_snapshot_and_validation_use_injected_refresh_reads() {
         .snapshot_catalog(&store, "default")
         .await
         .unwrap();
-    let keys = active_provider_environment_keys(
+    let keys = reserved_provider_environment_keys(
         RefreshStateReader::Runtime(&refresh),
         &catalog,
         &provider,
-        0,
     )
     .await
     .unwrap();

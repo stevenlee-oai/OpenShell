@@ -81,6 +81,8 @@ pub struct L7EndpointConfig {
     pub path: String,
     pub tls: TlsMode,
     pub enforcement: EnforcementMode,
+    /// Require exactly one admitted account credential on every request.
+    pub require_credential_selection: bool,
     /// Maximum GraphQL request body bytes to buffer for inspection.
     pub graphql_max_body_bytes: usize,
     /// Maximum JSON-RPC request body bytes to buffer for inspection.
@@ -165,7 +167,9 @@ pub fn parse_l7_config(config: &EndpointConfig) -> Option<L7EndpointConfig> {
     };
 
     let enforcement = match config.enforcement {
-        EnforcementSetting::Enforce => EnforcementMode::Enforce,
+        EnforcementSetting::Enforce | EnforcementSetting::EnforceCredentialBound => {
+            EnforcementMode::Enforce
+        }
         EnforcementSetting::Default | EnforcementSetting::Audit => EnforcementMode::Audit,
         EnforcementSetting::Unknown => unreachable!("endpoint modes were validated above"),
     };
@@ -232,6 +236,8 @@ pub fn parse_l7_config(config: &EndpointConfig) -> Option<L7EndpointConfig> {
         path: config.path.clone(),
         tls,
         enforcement,
+        require_credential_selection: config.enforcement
+            == EnforcementSetting::EnforceCredentialBound,
         graphql_max_body_bytes,
         json_rpc_max_body_bytes,
         mcp_strict_tool_names,

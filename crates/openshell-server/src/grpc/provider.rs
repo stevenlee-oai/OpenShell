@@ -1254,6 +1254,7 @@ pub(super) async fn resolve_provider_environment_from_records(
         &HashMap::new(),
         &credentials,
         None,
+        &HashMap::new(),
     )
     .await
 }
@@ -1270,6 +1271,7 @@ pub(super) async fn resolve_provider_environment_from_records_with_credentials(
         &HashMap::new(),
         credentials,
         None,
+        &HashMap::new(),
     )
     .await
 }
@@ -1290,6 +1292,7 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
         policy_bindings,
         &credentials,
         None,
+        &HashMap::new(),
     )
     .await
 }
@@ -1300,6 +1303,7 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
     policy_bindings: &HashMap<String, Vec<StaticCredentialEndpointBinding>>,
     credentials: &crate::credentials::CredentialRuntime,
     sandbox_id: Option<&str>,
+    request_policy_owners: &HashMap<String, Vec<String>>,
 ) -> Result<ProviderEnvironment, Status> {
     if records.is_empty() {
         return Ok(ProviderEnvironment::default());
@@ -1315,7 +1319,7 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
     let mut readiness_reason = openshell_core::proto::ProviderReadinessReason::Unspecified;
     let mut expired_static_keys = HashSet::new();
     let now_ms = crate::persistence::current_time_ms();
-    validate_provider_environment_records_unique_at(catalog, records, now_ms)?;
+    validate_provider_environment_records_unique(catalog, records)?;
     let registry = openshell_providers::ProviderRegistry::new();
 
     for record in records {
@@ -1487,6 +1491,10 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
                             endpoints,
                             refresh_epochs.get(key).map(String::as_str),
                             profile_stable_placeholder_keys.contains(key),
+                            request_policy_owners
+                                .get(name)
+                                .map(Vec::as_slice)
+                                .unwrap_or_default(),
                         ),
                     );
                 }
@@ -1566,6 +1574,10 @@ pub(super) async fn resolve_provider_environment_from_records_with_policy_bindin
                             endpoints,
                             refresh_epochs.get(&key).map(String::as_str),
                             profile_stable_placeholder_keys.contains(&key),
+                            request_policy_owners
+                                .get(name)
+                                .map(Vec::as_slice)
+                                .unwrap_or_default(),
                         ),
                     );
                 }
@@ -1727,6 +1739,7 @@ pub(super) fn static_credential_request_metadata(
                     &baseline.endpoints,
                     refresh_epochs.get(key).map(String::as_str),
                     credential.stable_placeholder,
+                    &baseline.request_policy_owners,
                 );
                 if expected != *baseline {
                     continue;
@@ -1789,6 +1802,7 @@ fn static_credential_binding(
     endpoints: &[StaticCredentialEndpointBinding],
     authorization_epoch: Option<&str>,
     stable_external_placeholder: bool,
+    request_policy_owners: &[String],
 ) -> StaticCredentialBinding {
     // External stable placeholders do not have a refresh authorization epoch.
     // A fixed domain value keeps their handle stable across value updates while
@@ -1807,6 +1821,12 @@ fn static_credential_binding(
         format!("refresh:{workload_credential_handle}")
     };
     StaticCredentialBinding {
+        request_policy_provider: if request_policy_owners.is_empty() {
+            String::new()
+        } else {
+            record.name.clone()
+        },
+        request_policy_owners: request_policy_owners.to_vec(),
         endpoints: endpoints.to_vec(),
         credential_identity,
         workload_credential_handle,
@@ -2226,14 +2246,13 @@ pub async fn validate_provider_environment_keys_unique_with_catalog(
     workspace: &str,
     provider_names: &[String],
 ) -> Result<(), Status> {
-    validate_provider_environment_keys_unique_at(
+    validate_provider_environment_keys_unique_for_candidate(
         store,
         refresh,
         catalog,
         workspace,
         provider_names,
         None,
-        crate::persistence::current_time_ms(),
     )
     .await
 }
@@ -2286,14 +2305,13 @@ pub async fn validate_provider_update_against_attached_sandboxes_with_catalog(
         let Some(spec) = sandbox.spec.as_ref() else {
             continue;
         };
-        validate_provider_environment_keys_unique_at(
+        validate_provider_environment_keys_unique_for_candidate(
             store,
             refresh,
             catalog,
                         workspace,
             &spec.providers,
             Some(provider),
-            crate::persistence::current_time_ms(),
         )
         .await
         .map_err(|err| {
@@ -2306,14 +2324,13 @@ pub async fn validate_provider_update_against_attached_sandboxes_with_catalog(
     Ok(())
 }
 
-async fn validate_provider_environment_keys_unique_at(
+async fn validate_provider_environment_keys_unique_for_candidate(
     store: &Store,
     refresh: RefreshStateReader<'_>,
     catalog: &EffectiveProviderProfileCatalog,
     workspace: &str,
     provider_names: &[String],
     candidate_provider: Option<&Provider>,
-    now_ms: i64,
 ) -> Result<(), Status> {
     let mut seen_credentials = HashMap::<String, String>::new();
     let mut seen_plugin_config = HashMap::<String, String>::new();
@@ -2334,7 +2351,7 @@ async fn validate_provider_environment_keys_unique_at(
             &mut seen_credentials,
             &mut seen_plugin_config,
             &provider_name,
-            active_provider_environment_keys(refresh, catalog, &provider, now_ms).await?,
+            reserved_provider_environment_keys(refresh, catalog, &provider).await?,
             provider_plugin_environment_keys(catalog, &provider),
         )?;
         dynamic_bindings.extend(dynamic_token_grant_bindings_for_provider_with_catalog(
@@ -2345,10 +2362,9 @@ async fn validate_provider_environment_keys_unique_at(
     Ok(())
 }
 
-fn validate_provider_environment_records_unique_at(
+fn validate_provider_environment_records_unique(
     catalog: &EffectiveProviderProfileCatalog,
     records: &[ProviderEnvironmentRecord],
-    now_ms: i64,
 ) -> Result<(), Status> {
     let mut seen_credentials = HashMap::<String, String>::new();
     let mut seen_plugin_config = HashMap::<String, String>::new();
@@ -2359,7 +2375,7 @@ fn validate_provider_environment_records_unique_at(
             &mut seen_credentials,
             &mut seen_plugin_config,
             &record.name,
-            active_keys_with_refresh_states(catalog, provider, &record.refresh_states, now_ms),
+            reserved_keys_with_refresh_states(catalog, provider, &record.refresh_states),
             provider_plugin_environment_keys(catalog, provider),
         )?;
         dynamic_bindings.extend(dynamic_token_grant_bindings_for_provider_with_catalog(
@@ -2611,54 +2627,42 @@ fn validate_dynamic_token_grant_bindings_unambiguous(
     Ok(())
 }
 
-async fn active_provider_environment_keys(
+async fn reserved_provider_environment_keys(
     refresh: RefreshStateReader<'_>,
     catalog: &EffectiveProviderProfileCatalog,
     provider: &Provider,
-    now_ms: i64,
 ) -> Result<Vec<String>, Status> {
-    active_provider_environment_keys_for_identity(
-        refresh,
-        catalog,
-        provider,
-        provider.object_id(),
-        now_ms,
-    )
-    .await
-}
-
-async fn active_provider_environment_keys_for_identity(
-    refresh: RefreshStateReader<'_>,
-    catalog: &EffectiveProviderProfileCatalog,
-    provider: &Provider,
-    provider_identity: &str,
-    now_ms: i64,
-) -> Result<Vec<String>, Status> {
-    let refresh_states = if provider_identity.is_empty() {
+    let refresh_states = if provider.object_id().is_empty() {
         Vec::new()
     } else {
-        refresh.list(provider_identity).await?
+        refresh.list(provider.object_id()).await?
     };
-    Ok(active_keys_with_refresh_states(
+    Ok(reserved_keys_with_refresh_states(
         catalog,
         provider,
         &refresh_states,
-        now_ms,
     ))
 }
 
-fn active_keys_with_refresh_states(
+fn reserved_keys_with_refresh_states(
     catalog: &EffectiveProviderProfileCatalog,
     provider: &Provider,
     refresh_states: &[StoredProviderCredentialRefreshState],
-    now_ms: i64,
 ) -> Vec<String> {
     let broker_only_credential_keys =
         broker_only_provider_credential_keys_for_provider(catalog, provider);
-    let mut keys = active_provider_credential_keys(provider, now_ms, &broker_only_credential_keys);
+    // A stored credential retains its environment-name ownership after expiry:
+    // a later refresh must not collide with another provider's placeholder.
+    let mut keys: Vec<_> = provider
+        .credentials
+        .keys()
+        .chain(provider.credential_handles.keys())
+        .filter(|key| !is_non_injectable_provider_credential(provider, key))
+        .filter(|key| !broker_only_credential_keys.contains(*key))
+        .filter(|key| is_valid_env_key(key))
+        .cloned()
+        .collect();
     for state in refresh_states {
-        // The primary key plus every co-minted output key this refresh owns,
-        // so a configured-but-not-yet-minted refresh reserves all of them.
         keys.extend(
             std::iter::once(state.credential_key.clone())
                 .chain(state.additional_output_keys.values().cloned())
@@ -2668,33 +2672,6 @@ fn active_keys_with_refresh_states(
     }
     keys.sort();
     keys.dedup();
-    keys
-}
-
-fn active_provider_credential_keys(
-    provider: &Provider,
-    now_ms: i64,
-    broker_only_credential_keys: &HashSet<String>,
-) -> Vec<String> {
-    let mut keys: Vec<String> = provider
-        .credentials
-        .keys()
-        .filter(|key| !is_non_injectable_provider_credential(provider, key))
-        .filter(|key| !broker_only_credential_keys.contains(*key))
-        .filter(|key| is_valid_env_key(key))
-        .filter(|key| provider_credential_not_expired(provider, key, now_ms))
-        .cloned()
-        .collect();
-    keys.extend(
-        provider
-            .credential_handles
-            .keys()
-            .filter(|key| !is_non_injectable_provider_credential(provider, key))
-            .filter(|key| !broker_only_credential_keys.contains(*key))
-            .filter(|key| is_valid_env_key(key))
-            .filter(|key| provider_credential_not_expired(provider, key, now_ms))
-            .cloned(),
-    );
     keys
 }
 
@@ -2726,14 +2703,6 @@ pub(super) fn broker_only_provider_credential_keys(profile: &ProviderProfile) ->
             (!key.is_empty()).then(|| key.to_string())
         })
         .collect()
-}
-
-fn provider_credential_not_expired(provider: &Provider, key: &str, now_ms: i64) -> bool {
-    provider
-        .credential_expiration_times
-        .get(key)
-        .and_then(|value| openshell_core::time::timestamp_to_millis(value).ok())
-        .is_none_or(|expiration_ms| expiration_ms > now_ms)
 }
 
 pub(super) fn is_non_injectable_provider_credential(provider: &Provider, key: &str) -> bool {
@@ -14167,6 +14136,7 @@ pub(super) mod tests {
             &endpoints,
             None,
             false,
+            &[],
         );
         let mut environment = ProviderEnvironment {
             environment: HashMap::from([("TOKEN".into(), "synthetic-sensitive-token".into())]),
@@ -14269,7 +14239,7 @@ pub(super) mod tests {
         }];
         let external_binding =
             |sandbox, record: &ProviderEnvironmentRecord, key, endpoints: &[_]| {
-                static_credential_binding(Some(sandbox), record, key, endpoints, None, true)
+                static_credential_binding(Some(sandbox), record, key, endpoints, None, true, &[])
             };
         let initial = external_binding("sandbox-a", &record, "API_KEY", &endpoints);
         assert!(!initial.workload_credential_handle.is_empty());
@@ -14306,7 +14276,7 @@ pub(super) mod tests {
             "recreating the same provider name must revoke the original handle"
         );
         assert!(
-            static_credential_binding(None, &record, "API_KEY", &endpoints, None, true)
+            static_credential_binding(None, &record, "API_KEY", &endpoints, None, true, &[])
                 .workload_credential_handle
                 .is_empty(),
             "an external handle requires an authenticated sandbox binding"
@@ -14491,6 +14461,7 @@ pub(super) mod tests {
             &HashMap::new(),
             &state.credentials,
             Some("sandbox-id"),
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -14562,6 +14533,7 @@ pub(super) mod tests {
                 &HashMap::new(),
                 &state.credentials,
                 Some("sandbox-id"),
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -14621,6 +14593,7 @@ pub(super) mod tests {
                 &HashMap::new(),
                 &state.credentials,
                 Some("sandbox-id"),
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -14695,6 +14668,7 @@ pub(super) mod tests {
             &HashMap::new(),
             &state.credentials,
             Some("sandbox-id"),
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -14888,6 +14862,7 @@ pub(super) mod tests {
                 &HashMap::new(),
                 &credentials,
                 None,
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -15065,6 +15040,7 @@ pub(super) mod tests {
                 &policy_bindings,
                 &credentials,
                 Some("sandbox-id"),
+                &HashMap::new(),
             )
             .await
             .expect("provider environment");
@@ -15146,6 +15122,7 @@ pub(super) mod tests {
                 &HashMap::new(),
                 &credentials,
                 None,
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -15170,6 +15147,7 @@ pub(super) mod tests {
             &policy_bindings,
             &credentials,
             None,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -17554,11 +17532,10 @@ pub(super) mod tests {
             .snapshot_catalog(state.store.as_ref(), "default")
             .await
             .unwrap();
-        let keys = active_provider_environment_keys(
+        let keys = reserved_provider_environment_keys(
             RefreshStateReader::Runtime(&state.refresh),
             &catalog,
             &provider,
-            0,
         )
         .await
         .unwrap();

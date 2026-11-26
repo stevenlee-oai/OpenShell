@@ -1984,3 +1984,84 @@ async fn response_middleware_sees_the_forwarded_request_head_without_injected_gr
         ]
     );
 }
+
+#[tokio::test]
+async fn static_accounts_share_an_mcp_endpoint_without_sharing_authority() {
+    use openshell_core::proto::{StaticCredentialBinding, StaticCredentialEndpointBinding};
+
+    let mut a = route("a-search", "/mcp");
+    a.protocol = "mcp";
+    a.method = "search";
+    let mut b_search = route("b-search", "/mcp");
+    b_search.protocol = "mcp";
+    b_search.method = "search";
+    let mut b_send = route("b-send", "/mcp");
+    b_send.protocol = "mcp";
+    b_send.method = "send";
+    let mut fixture = Fixture::new(&[a, b_search, b_send], &[], 3);
+    let binding = |identity: &str, owners: &[&str]| StaticCredentialBinding {
+        request_policy_provider: identity.split(':').next().unwrap().into(),
+        endpoints: vec![StaticCredentialEndpointBinding {
+            host: HOST.into(),
+            port: PORT.into(),
+            path: "/mcp".into(),
+        }],
+        credential_identity: identity.into(),
+        workload_credential_handle: String::new(),
+        request_policy_owners: owners.iter().map(|owner| (*owner).to_string()).collect(),
+    };
+    fixture.state = ProviderCredentialState::from_bound_environment(
+        1,
+        HashMap::from([
+            ("ACCOUNT_A".into(), "token-a".into()),
+            ("ACCOUNT_B".into(), "token-b".into()),
+        ]),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::from([
+            (
+                "ACCOUNT_A".into(),
+                binding("provider-a:ACCOUNT_A", &["a-search"]),
+            ),
+            (
+                "ACCOUNT_B".into(),
+                binding("provider-b:ACCOUNT_B", &["b-search", "b-send"]),
+            ),
+        ]),
+        Vec::new(),
+    )
+    .unwrap();
+    let issued = fixture.state.snapshot().child_env.clone();
+    for (account, tool, token) in [
+        ("ACCOUNT_A", "search", Some("token-a")),
+        ("ACCOUNT_B", "search", Some("token-b")),
+        ("ACCOUNT_B", "send", Some("token-b")),
+        ("ACCOUNT_A", "send", None),
+    ] {
+        let mut connection = fixture.connect();
+        let body = native_protocol_body("mcp", tool);
+        let head = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nMCP-Protocol-Version: 2025-11-25\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            issued[account],
+            body.len()
+        );
+        connection.app.write_all(head.as_bytes()).await.unwrap();
+        connection.app.write_all(&body).await.unwrap();
+        let response = connection.response().await;
+        let capture = connection.finish().await;
+        if let Some(token) = token {
+            assert!(
+                response.starts_with("HTTP/1.1 204"),
+                "{account}/{tool}: {response}"
+            );
+            assert_eq!(capture.requests.len(), 1);
+            assert!(capture.requests[0].contains(&format!("Authorization: Bearer {token}")));
+        } else {
+            assert!(!response.starts_with("HTTP/1.1 204"));
+            assert_eq!(
+                capture.bytes_seen, 0,
+                "mismatched account must be denied before upstream"
+            );
+        }
+    }
+}

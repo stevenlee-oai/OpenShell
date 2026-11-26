@@ -5399,6 +5399,10 @@ fn rewrite_forward_request(
     canonical_authority: &str,
     secret_resolver: Option<&SecretResolver>,
 ) -> Result<Vec<u8>, secrets::UnresolvedPlaceholderError> {
+    let selection_resolver = secret_resolver
+        .filter(|resolver| resolver.requires_credential_selection())
+        .map(SecretResolver::for_request_selection);
+    let secret_resolver = selection_resolver.as_ref().or(secret_resolver);
     let header_end = raw[..used]
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -5526,6 +5530,9 @@ fn rewrite_forward_request(
         return Err(secrets::UnresolvedPlaceholderError::unavailable("header"));
     }
 
+    if let Some(resolver) = secret_resolver {
+        resolver.validate_credential_selection()?;
+    }
     Ok(output)
 }
 
@@ -7119,7 +7126,12 @@ async fn handle_forward_proxy_inner(
                     .end(openshell_core::proto::MiddlewareSessionEndReason::Cancellation)
                     .await;
             }
-            if e.is_placement_mismatch() {
+            if e.is_placement_mismatch() || e.is_selection_required() {
+                if e.is_selection_required()
+                    && let Some(observer) = endpoint_observer.as_ref()
+                {
+                    observer.observe(openshell_core::endpoint_status::EndpointResult::PolicyDenied);
+                }
                 crate::l7::relay::reject_credential_resolution(
                     client,
                     &l7_ctx,
@@ -7358,6 +7370,14 @@ async fn handle_forward_proxy_inner(
     let signing_region = forward_upgrade_config
         .as_ref()
         .map_or("", |config| config.signing_region.as_str());
+    // Header credentials have already been selected and validated before dialing.
+    let post_selection_resolver = secret_resolver
+        .as_ref()
+        .filter(|resolver| resolver.requires_credential_selection())
+        .map(|resolver| resolver.as_ref().clone().without_credential_selection());
+    let relay_resolver = post_selection_resolver
+        .as_ref()
+        .or(secret_resolver.as_deref());
     let outcome_result = relay_rewritten_forward_request(
         method,
         &upstream_target,
@@ -7368,7 +7388,7 @@ async fn handle_forward_proxy_inner(
             generation_guard: &forward_generation_guard,
             credential_generation,
             websocket_extensions,
-            secret_resolver: secret_resolver.as_deref(),
+            secret_resolver: relay_resolver,
             body_classifier: endpoint_credentials.body_classifier.as_deref(),
             request_body_credential_rewrite,
             deny_uninspected_credentials,
@@ -13597,6 +13617,7 @@ network_policies:
             path: "/**".to_string(),
             tls: crate::l7::TlsMode::Auto,
             enforcement: crate::l7::EnforcementMode::Enforce,
+            require_credential_selection: false,
             graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
             json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
             mcp_strict_tool_names: true,
@@ -14009,6 +14030,8 @@ network_policies:
             TestHashMap::from([(
                 "API_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "api.example.test".to_string(),
                         port: 80,
@@ -15074,6 +15097,7 @@ network_policies:
                     path: "/**".to_string(),
                     tls: crate::l7::TlsMode::Auto,
                     enforcement: crate::l7::EnforcementMode::Enforce,
+                    require_credential_selection: false,
                     graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
                     json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
                     mcp_strict_tool_names: true,
@@ -15097,6 +15121,7 @@ network_policies:
                     path: "/graphql".to_string(),
                     tls: crate::l7::TlsMode::Auto,
                     enforcement: crate::l7::EnforcementMode::Enforce,
+                    require_credential_selection: false,
                     graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
                     json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
                     mcp_strict_tool_names: true,
@@ -16440,6 +16465,8 @@ network_policies:
             TestHashMap::from([(
                 "API_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "api.example.com".to_string(),
                         port: 80,
@@ -16485,6 +16512,8 @@ network_policies:
             TestHashMap::from([(
                 "API_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "api.example.com".to_string(),
                         port: 80,
@@ -16531,6 +16560,8 @@ network_policies:
             TestHashMap::from([(
                 "API_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "api.example.com".to_string(),
                         port: 80,
@@ -17233,6 +17264,8 @@ network_policies:
             TestHashMap::from([(
                 "BOT_TOKEN".into(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     credential_identity: "provider:BOT_TOKEN".into(),
                     workload_credential_handle: String::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
@@ -17295,6 +17328,8 @@ network_policies:
             TestHashMap::from([(
                 "API_KEY".into(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     credential_identity: "provider".into(),
                     workload_credential_handle: String::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
@@ -17442,6 +17477,8 @@ network_policies:
             TestHashMap::from([(
                 "API_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "allowed.example.com".to_string(),
                         port: 80,
@@ -17534,6 +17571,8 @@ network_policies:
                 (
                     key.clone(),
                     StaticCredentialBinding {
+                        request_policy_provider: String::new(),
+                        request_policy_owners: Vec::new(),
                         endpoints: vec![StaticCredentialEndpointBinding {
                             host: "allowed.example.com".to_string(),
                             port: 80,

@@ -2110,8 +2110,9 @@ fn apply_captured_policy_context(
     extend_credentialed_scopes_from_policy_bindings(
         &mut provider_context.credentialed_scopes,
         &policy_credential_bindings,
-        &provider_context.endpointless_provider_names,
+        &provider_context.endpointless_provider_ids,
     );
+    stamp_request_bound_credential_owners(&mut policy, &provider_context.endpointless_provider_ids);
     stamp_provider_credentialed_endpoints(&mut policy, &provider_context.credentialed_scopes);
     if matches!(policy_source, PolicySource::Global) {
         openshell_core::policy_identity::stamp_global_token_grant_owners(&mut policy);
@@ -2902,6 +2903,19 @@ async fn handle_get_sandbox_config_inner(
 
 const CEDAR_SUPPORT_REQUIRED: &str = "Cedar policy requires a supervisor with Cedar support";
 
+/// Capabilities used when the Gateway revalidates its own configuration snapshot.
+/// Supervisor requests must still report their actual supported capabilities.
+pub(super) fn gateway_policy_capabilities() -> Vec<String> {
+    use openshell_core::extension_protocol::{
+        POLICY_CEDAR_V1, POLICY_REQUEST_BOUND_CREDENTIALS_V1,
+    };
+
+    vec![
+        POLICY_CEDAR_V1.to_string(),
+        POLICY_REQUEST_BOUND_CREDENTIALS_V1.to_string(),
+    ]
+}
+
 /// Refuses a Cedar policy to a supervisor that did not report Cedar support.
 ///
 /// Callers must not answer with an empty compatibility configuration
@@ -2919,7 +2933,28 @@ pub fn require_policy_capabilities(
     {
         return Err(Status::unimplemented(CEDAR_SUPPORT_REQUIRED));
     }
+    if policy.is_some_and(policy_uses_request_bound_credentials)
+        && !openshell_core::extension_protocol::has_capability(
+            &supported_capabilities,
+            openshell_core::extension_protocol::POLICY_REQUEST_BOUND_CREDENTIALS_V1,
+        )
+    {
+        return Err(Status::unimplemented(
+            "request-bound credentials require a compatible supervisor",
+        ));
+    }
     Ok(())
+}
+
+fn policy_uses_request_bound_credentials(policy: &ProtoSandboxPolicy) -> bool {
+    policy
+        .network_policies
+        .values()
+        .flat_map(|rule| &rule.endpoints)
+        .any(|endpoint| {
+            endpoint.enforcement
+                == openshell_core::proto::NetworkEnforcementMode::EnforceCredentialBound as i32
+        })
 }
 
 /// Resolve the same effective configuration for authenticated RPCs and trusted
@@ -3070,10 +3105,14 @@ async fn build_sandbox_config_snapshot_with_sources(
     extend_credentialed_scopes_from_policy_bindings(
         &mut provider_policy_context.credentialed_scopes,
         &policy_credential_bindings,
-        &provider_policy_context.endpointless_provider_names,
+        &provider_policy_context.endpointless_provider_ids,
     );
     let mut configuration_error = String::new();
     if let Some(effective_policy) = policy.as_mut() {
+        stamp_request_bound_credential_owners(
+            effective_policy,
+            &provider_policy_context.endpointless_provider_ids,
+        );
         stamp_provider_credentialed_endpoints(
             effective_policy,
             &provider_policy_context.credentialed_scopes,
@@ -3584,7 +3623,7 @@ pub(super) struct CredentialedEndpointScope {
 struct ProviderPolicyContext {
     layers: Vec<ProviderPolicyLayer>,
     credentialed_scopes: Vec<CredentialedEndpointScope>,
-    endpointless_provider_names: HashSet<String>,
+    endpointless_provider_ids: HashMap<String, String>,
 }
 
 async fn provider_policy_context_with_catalog(
@@ -3610,7 +3649,7 @@ fn provider_policy_context_from_records(
 ) -> ProviderPolicyContext {
     let mut layers = Vec::new();
     let mut credentialed_scopes = Vec::new();
-    let mut endpointless_provider_names = HashSet::new();
+    let mut endpointless_provider_ids = HashMap::new();
 
     for record in records {
         let name = &record.name;
@@ -3631,7 +3670,7 @@ fn provider_policy_context_from_records(
         };
 
         if !super::provider::provider_profile_endpoints_are_active(&profile, provider) {
-            endpointless_provider_names.insert(name.clone());
+            endpointless_provider_ids.insert(name.clone(), record.object_id.clone());
             continue;
         }
 
@@ -3643,7 +3682,7 @@ fn provider_policy_context_from_records(
             endpoint.token_grant_owner = owner;
         }
         if rule.endpoints.is_empty() {
-            endpointless_provider_names.insert(name.clone());
+            endpointless_provider_ids.insert(name.clone(), record.object_id.clone());
         }
         if profile.has_credentialed_endpoints() {
             for endpoint in &mut rule.endpoints {
@@ -3667,7 +3706,33 @@ fn provider_policy_context_from_records(
     ProviderPolicyContext {
         layers,
         credentialed_scopes,
-        endpointless_provider_names,
+        endpointless_provider_ids,
+    }
+}
+
+fn stamp_request_bound_credential_owners(
+    policy: &mut ProtoSandboxPolicy,
+    provider_ids: &HashMap<String, String>,
+) {
+    for rule in policy.network_policies.values_mut() {
+        let baseline = rule.clone();
+        for (index, endpoint) in rule.endpoints.iter_mut().enumerate() {
+            if endpoint.enforcement
+                != openshell_core::proto::NetworkEnforcementMode::EnforceCredentialBound as i32
+            {
+                continue;
+            }
+            let Some(id) = endpoint
+                .credential_binding
+                .as_ref()
+                .and_then(|binding| provider_ids.get(&binding.provider))
+            else {
+                continue;
+            };
+            endpoint.token_grant_owner =
+                openshell_core::policy_identity::provider_token_grant_owners(id, &baseline)[index]
+                    .clone();
+        }
     }
 }
 
@@ -3685,10 +3750,10 @@ fn endpoint_ports(endpoint: &NetworkEndpoint) -> Vec<u32> {
 fn extend_credentialed_scopes_from_policy_bindings(
     scopes: &mut Vec<CredentialedEndpointScope>,
     bindings: &HashMap<String, Vec<StaticCredentialEndpointBinding>>,
-    endpointless_provider_names: &HashSet<String>,
+    endpointless_provider_ids: &HashMap<String, String>,
 ) {
     for (provider_name, provider_bindings) in bindings {
-        if !endpointless_provider_names.contains(provider_name) {
+        if !endpointless_provider_ids.contains_key(provider_name) {
             continue;
         }
         for binding in provider_bindings {
@@ -3896,18 +3961,39 @@ pub(super) async fn handle_get_sandbox_provider_environment(
     let supports_stable_placeholder_environment_keys = request
         .get_ref()
         .supports_stable_placeholder_environment_keys;
+    let supports_request_policy_bound_credentials =
+        request.get_ref().supports_request_policy_bound_credentials;
     let principal = crate::auth::guard::enforce_sandbox_scope(&request, &sandbox_id)?;
     drop(request);
 
     let sandbox =
         super::sandbox::fetch_and_authorize_sandbox(state, &principal, &sandbox_id).await?;
-    let environment = load_sandbox_provider_environment(
+    let mut environment = load_sandbox_provider_environment(
         state,
         &sandbox,
         supports_static_credential_bindings,
         supports_stable_placeholder_environment_keys,
     )
     .await?;
+    if !supports_request_policy_bound_credentials {
+        let unsupported: Vec<_> = environment
+            .static_credential_bindings
+            .iter()
+            .filter(|(_, binding)| !binding.request_policy_owners.is_empty())
+            .map(|(key, _)| key.clone())
+            .collect();
+        if !unsupported.is_empty() {
+            environment.readiness_reason = ProviderReadinessReason::UnsupportedSupervisor as i32;
+        }
+        for key in unsupported {
+            environment.environment.remove(&key);
+            environment.static_credential_bindings.remove(&key);
+            environment.credential_expiration_times.remove(&key);
+            environment
+                .stable_placeholder_environment_keys
+                .retain(|candidate| candidate != &key);
+        }
+    }
     Ok(Response::new(environment))
 }
 
@@ -4017,6 +4103,29 @@ pub async fn build_provider_environment_snapshot_from_inputs(
     let provider_names = &spec.providers;
     let provider_profile_catalog = &inputs.catalog;
     let provider_records = &inputs.provider_records;
+    let mut request_policy_owners = HashMap::<String, Vec<String>>::new();
+    for endpoint in effective_policy
+        .network_policies
+        .values()
+        .flat_map(|rule| &rule.endpoints)
+    {
+        if endpoint.enforcement
+            != openshell_core::proto::NetworkEnforcementMode::EnforceCredentialBound as i32
+            || endpoint.token_grant_owner.is_empty()
+        {
+            continue;
+        }
+        if let Some(binding) = &endpoint.credential_binding {
+            request_policy_owners
+                .entry(binding.provider.clone())
+                .or_default()
+                .push(endpoint.token_grant_owner.clone());
+        }
+    }
+    for owners in request_policy_owners.values_mut() {
+        owners.sort();
+        owners.dedup();
+    }
     let mut provider_environment =
         super::provider::resolve_provider_environment_from_records_with_policy_bindings_and_credentials(
             provider_profile_catalog,
@@ -4024,6 +4133,7 @@ pub async fn build_provider_environment_snapshot_from_inputs(
             &policy_credential_bindings,
             &state.credentials,
             Some(&sandbox_id),
+            &request_policy_owners,
         )
         .await?;
 
@@ -5216,9 +5326,7 @@ pub(super) async fn handle_report_sandbox_configuration(
     }
     if reported == ConfigurationAdmissionState::Accepted {
         let mut config_request = Request::new(GetSandboxConfigRequest {
-            supported_capabilities: vec![
-                openshell_core::extension_protocol::POLICY_CEDAR_V1.to_string(),
-            ],
+            supported_capabilities: gateway_policy_capabilities(),
             name: sandbox_name.clone(),
             workspace_scope: Some(openshell_core::proto::workspace_selector(workspace.clone())),
         });
@@ -5237,9 +5345,7 @@ pub(super) async fn handle_report_sandbox_configuration(
         // Runtime error strings may contain parser payloads. Only gateway-authored
         // diagnostics may be exposed verbatim through public sandbox status.
         let mut config_request = Request::new(GetSandboxConfigRequest {
-            supported_capabilities: vec![
-                openshell_core::extension_protocol::POLICY_CEDAR_V1.to_string(),
-            ],
+            supported_capabilities: gateway_policy_capabilities(),
             workspace_scope: Some(openshell_core::proto::workspace_selector(workspace)),
             name: sandbox_name,
         });
@@ -7724,7 +7830,7 @@ struct PolicyCredentialBindingValidationContext<'a> {
     catalog: &'a EffectiveProviderProfileCatalog,
     records: &'a [super::provider::ProviderEnvironmentRecord],
     credentialed_scopes: &'a [CredentialedEndpointScope],
-    endpointless_provider_names: &'a HashSet<String>,
+    endpointless_provider_ids: &'a HashMap<String, String>,
 }
 
 struct SandboxPolicyMergeValidationData {
@@ -7732,7 +7838,7 @@ struct SandboxPolicyMergeValidationData {
     catalog: EffectiveProviderProfileCatalog,
     records: Vec<super::provider::ProviderEnvironmentRecord>,
     credentialed_scopes: Vec<CredentialedEndpointScope>,
-    endpointless_provider_names: HashSet<String>,
+    endpointless_provider_ids: HashMap<String, String>,
 }
 
 impl SandboxPolicyMergeValidationData {
@@ -7741,7 +7847,7 @@ impl SandboxPolicyMergeValidationData {
             catalog: &self.catalog,
             records: &self.records,
             credentialed_scopes: &self.credentialed_scopes,
-            endpointless_provider_names: &self.endpointless_provider_names,
+            endpointless_provider_ids: &self.endpointless_provider_ids,
         }
     }
 }
@@ -7785,7 +7891,7 @@ async fn sandbox_policy_merge_validation_data_with_catalog(
     let ProviderPolicyContext {
         layers,
         credentialed_scopes,
-        endpointless_provider_names,
+        endpointless_provider_ids,
     } = provider_policy_context_from_records(catalog, &records);
     let provider_layers = if composition_enabled {
         layers
@@ -7802,7 +7908,7 @@ async fn sandbox_policy_merge_validation_data_with_catalog(
         catalog: catalog.clone(),
         records,
         credentialed_scopes,
-        endpointless_provider_names,
+        endpointless_provider_ids,
     })
 }
 
@@ -7827,7 +7933,7 @@ fn validate_operator_merged_credential_policy(
     extend_credentialed_scopes_from_policy_bindings(
         &mut credentialed_scopes,
         bindings,
-        context.endpointless_provider_names,
+        context.endpointless_provider_ids,
     );
     // Recompute the credential flags without clearing owner IDs that provider
     // composition already derived for this effective policy.
@@ -10909,7 +11015,7 @@ mod tests {
         extend_credentialed_scopes_from_policy_bindings(
             &mut scopes,
             &bindings,
-            &HashSet::from(["bound".to_string()]),
+            &HashMap::from([("bound".to_string(), "bound-provider-id".to_string())]),
         );
 
         assert_eq!(
@@ -12904,6 +13010,7 @@ mod tests {
         let environment = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-snapshot-consistency".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -14985,6 +15092,7 @@ mod tests {
         let legacy_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-provider-env".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -14998,6 +15106,7 @@ mod tests {
         let v2_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-provider-env".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15071,6 +15180,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-files-and-credentials".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: false,
@@ -15131,6 +15241,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-cedar-env".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15179,6 +15290,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-static-ready".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: false,
@@ -15238,6 +15350,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-legacy-provider-env".to_string(),
                 supports_static_credential_bindings: false,
                 supports_stable_placeholder_environment_keys: false,
@@ -15283,6 +15396,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-unbound-provider-env".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15399,6 +15513,7 @@ mod tests {
             let incompatible_environment = handle_get_sandbox_provider_environment(
                 &state,
                 with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                    supports_request_policy_bound_credentials: true,
                     sandbox_id: "sb-policy-binding".to_string(),
                     supports_static_credential_bindings: supports_bindings,
                     supports_stable_placeholder_environment_keys: supports_stable,
@@ -15443,6 +15558,7 @@ mod tests {
         let environment = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-policy-binding".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15522,6 +15638,7 @@ mod tests {
         let next_environment = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-policy-binding".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15589,6 +15706,7 @@ mod tests {
         let unbound_environment = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-policy-binding".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15686,6 +15804,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-mixed-provider-env".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15795,6 +15914,7 @@ mod tests {
         let response = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-token-exchange-subject".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15863,6 +15983,7 @@ mod tests {
         let first = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-provider-revision".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -15903,6 +16024,7 @@ mod tests {
         let second = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-provider-revision".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -16567,6 +16689,7 @@ mod tests {
         let baseline_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-attach-lifecycle".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -16601,6 +16724,7 @@ mod tests {
         let attached_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-attach-lifecycle".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -16643,6 +16767,7 @@ mod tests {
         let detached_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-attach-lifecycle".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -16748,6 +16873,7 @@ mod tests {
         let baseline_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-attach-lifecycle".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -16785,6 +16911,7 @@ mod tests {
         let attached_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-attach-lifecycle".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -16826,6 +16953,7 @@ mod tests {
         let detached_env = handle_get_sandbox_provider_environment(
             &state,
             with_user(Request::new(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sb-attach-lifecycle".to_string(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,
@@ -26847,6 +26975,7 @@ mod tests {
         let err = handle_get_sandbox_provider_environment(
             &state,
             non_member_request(GetSandboxProviderEnvironmentRequest {
+                supports_request_policy_bound_credentials: true,
                 sandbox_id: "sandbox-other".into(),
                 supports_static_credential_bindings: true,
                 supports_stable_placeholder_environment_keys: true,

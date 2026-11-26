@@ -775,6 +775,26 @@ impl ConfigRuntime {
                 });
             }
         };
+        let valid = result.policy.as_ref().map_or(Ok(()), |policy| {
+            openshell_core::provider_credentials::validate_request_bound_credential_snapshot(
+                policy,
+                &provider.static_credential_bindings,
+            )
+        });
+        if let Err(error) = valid {
+            self.revoke_provider_environment(
+                ctx,
+                desired_identity.clone(),
+                ProviderReadinessReason::CredentialInstallFailed,
+                result.provider_env_revision,
+            )
+            .await;
+            return Err(ConfigRejection {
+                code: "invalid_provider_environment",
+                detail: error.to_string(),
+                admission_error: error.to_string(),
+            });
+        }
         if let Ok(prepared) = CapturedProviderEnvironment::prepare(&provider) {
             return Ok(prepared);
         }
@@ -940,7 +960,12 @@ impl ConfigRuntime {
             None
         } else {
             match self
-                .prepare_delivered_provider(ctx, provider_environment, &desired_environment)
+                .prepare_delivered_provider(
+                    ctx,
+                    provider_environment,
+                    &desired_environment,
+                    snapshot.policy.as_ref(),
+                )
                 .await
             {
                 Ok(prepared) => Some(prepared),
@@ -1091,6 +1116,7 @@ impl ConfigRuntime {
         ctx: &PolicyPollLoopContext,
         snapshot: openshell_core::proto::ProviderEnvironmentSnapshot,
         desired: &EnvironmentIdentity,
+        policy: Option<&openshell_core::proto::SandboxPolicy>,
     ) -> std::result::Result<CapturedProviderEnvironment, ConfigApplyFailure> {
         let identity = EnvironmentIdentity {
             attachment_epoch: snapshot.provider_attachment_epoch.clone(),
@@ -1123,6 +1149,10 @@ impl ConfigRuntime {
                         "provider environment is not ready for installation",
                         true,
                     )
+                }
+                Ok(provider) if policy.is_some_and(|policy| openshell_core::provider_credentials::validate_request_bound_credential_snapshot(policy, &provider.static_credential_bindings).is_err()) => {
+                    self.revoke_provider_environment(ctx, desired.clone(), ProviderReadinessReason::CredentialInstallFailed, revision).await;
+                    config_apply_failure("invalid_provider_environment", "request-bound credential metadata is invalid", false)
                 }
                 Ok(provider) => match CapturedProviderEnvironment::prepare(&provider) {
                     Ok(prepared) => return Ok(prepared),
@@ -2002,6 +2032,8 @@ mod tests {
             result.static_credential_bindings.insert(
                 "EXTERNAL_TOKEN".into(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "tools.example.com".into(),
                         port: 443,

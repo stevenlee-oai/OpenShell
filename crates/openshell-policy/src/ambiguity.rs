@@ -4,7 +4,7 @@
 //! Validation for endpoint selectors whose policy-derived behavior conflicts.
 
 use openshell_core::proto::{
-    NetworkEndpoint, NetworkEnforcementMode, NetworkTlsMode, SandboxPolicy,
+    NetworkBinary, NetworkEndpoint, NetworkEnforcementMode, NetworkTlsMode, SandboxPolicy,
 };
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::fmt;
@@ -46,8 +46,10 @@ impl fmt::Display for EndpointAmbiguity {
 
 struct EndpointRef<'a> {
     policy: &'a str,
+    provider_rule: bool,
     index: usize,
     endpoint: &'a NetworkEndpoint,
+    binaries: &'a [NetworkBinary],
 }
 
 /// Reject endpoint metadata ambiguity before a policy generation is activated.
@@ -72,8 +74,10 @@ pub fn find_endpoint_ambiguities(policy: &SandboxPolicy) -> Vec<EndpointAmbiguit
                 .enumerate()
                 .map(move |(index, endpoint)| EndpointRef {
                     policy: policy_name,
+                    provider_rule: crate::is_provider_rule_name(key),
                     index,
                     endpoint,
+                    binaries: &rule.binaries,
                 })
         })
         .collect::<Vec<_>>();
@@ -91,6 +95,14 @@ pub fn find_endpoint_ambiguities(policy: &SandboxPolicy) -> Vec<EndpointAmbiguit
             }
 
             let mut conflicts = connection_conflicts(left.endpoint, right.endpoint);
+            // L4 authorization ignores endpoint paths. An authored disjoint path
+            // therefore cannot make an uninspected route safe beside a bound route.
+            let bound_l4_overlap = (credential_bound(left.endpoint) && is_l4(right.endpoint))
+                || (credential_bound(right.endpoint) && is_l4(left.endpoint));
+            if bound_l4_overlap || path_patterns_overlap(&left.endpoint.path, &right.endpoint.path)
+            {
+                conflicts.extend(credential_bound_overlap_conflicts(left, right));
+            }
             if endpoint_contributes_request_pipeline_metadata(left.endpoint)
                 && endpoint_contributes_request_pipeline_metadata(right.endpoint)
                 && path_patterns_overlap(&left.endpoint.path, &right.endpoint.path)
@@ -262,20 +274,22 @@ fn request_pipeline_conflicts(left: &NetworkEndpoint, right: &NetworkEndpoint) -
         &left.signing_region,
         &right.signing_region,
     );
-    push_conflict(
-        &mut conflicts,
-        "credential_binding.provider",
-        &left
-            .credential_binding
-            .as_ref()
-            .map(|binding| binding.provider.as_str())
-            .unwrap_or_default(),
-        &right
-            .credential_binding
-            .as_ref()
-            .map(|binding| binding.provider.as_str())
-            .unwrap_or_default(),
-    );
+    if !compatible_credential_bound_selectors(left, right) {
+        push_conflict(
+            &mut conflicts,
+            "credential_binding.provider",
+            &left
+                .credential_binding
+                .as_ref()
+                .map(|binding| binding.provider.as_str())
+                .unwrap_or_default(),
+            &right
+                .credential_binding
+                .as_ref()
+                .map(|binding| binding.provider.as_str())
+                .unwrap_or_default(),
+        );
+    }
 
     if left.protocol.eq_ignore_ascii_case("graphql")
         && right.protocol.eq_ignore_ascii_case("graphql")
@@ -302,6 +316,14 @@ fn request_pipeline_conflicts(left: &NetworkEndpoint, right: &NetworkEndpoint) -
             &normalized_mcp_strict_tool_names(left),
             &normalized_mcp_strict_tool_names(right),
         );
+        if compatible_credential_bound_selectors(left, right) {
+            push_conflict(
+                &mut conflicts,
+                "mcp.versions",
+                &normalized_mcp_versions(left),
+                &normalized_mcp_versions(right),
+            );
+        }
     }
     conflicts
 }
@@ -356,12 +378,70 @@ fn normalized_tls(value: i32) -> i32 {
 }
 
 fn normalized_enforcement(value: i32) -> i32 {
-    if value == NetworkEnforcementMode::Enforce as i32 {
-        NetworkEnforcementMode::Enforce as i32
+    if value == NetworkEnforcementMode::Enforce as i32
+        || value == NetworkEnforcementMode::EnforceCredentialBound as i32
+    {
+        value
     } else if NetworkEnforcementMode::try_from(value).is_ok() {
         NetworkEnforcementMode::Audit as i32
     } else {
         value
+    }
+}
+
+fn credential_bound(endpoint: &NetworkEndpoint) -> bool {
+    endpoint.enforcement == NetworkEnforcementMode::EnforceCredentialBound as i32
+}
+
+fn is_l4(endpoint: &NetworkEndpoint) -> bool {
+    endpoint.protocol.is_empty() || is_explicit_tcp(&endpoint.protocol)
+}
+
+fn credential_endpoint(endpoint: &EndpointRef<'_>) -> bool {
+    endpoint.endpoint.credential_binding.is_some()
+        || (endpoint.provider_rule && endpoint.endpoint.provider_credentialed)
+}
+
+fn compatible_credential_bound_selectors(left: &NetworkEndpoint, right: &NetworkEndpoint) -> bool {
+    credential_bound(left)
+        && credential_bound(right)
+        && left.credential_binding.is_some()
+        && right.credential_binding.is_some()
+        && left.host.eq_ignore_ascii_case(&right.host)
+        && effective_ports(left) == effective_ports(right)
+        && left.path == right.path
+}
+
+fn credential_bound_overlap_conflicts(
+    left: &EndpointRef<'_>,
+    right: &EndpointRef<'_>,
+) -> Vec<String> {
+    let one_is_protected = credential_bound(left.endpoint) || credential_bound(right.endpoint);
+    if one_is_protected
+        && credential_endpoint(left)
+        && credential_endpoint(right)
+        && !compatible_credential_bound_selectors(left.endpoint, right.endpoint)
+    {
+        vec!["overlapping credential routes must both use enforce-credential-bound with the same exact host, ports, and path".to_string()]
+    } else if credential_bound(left.endpoint) != credential_bound(right.endpoint) {
+        // A broad L4 route or more-specific inspected route would otherwise
+        // authorize requests without selecting an account on the protected route.
+        vec!["an ordinary route cannot overlap an enforce-credential-bound route".to_string()]
+    } else if compatible_credential_bound_selectors(left.endpoint, right.endpoint)
+        && left.endpoint.credential_binding == right.endpoint.credential_binding
+        && (left.endpoint.access != right.endpoint.access
+            || left.endpoint.rules != right.endpoint.rules
+            || left.endpoint.deny_rules != right.endpoint.deny_rules
+            || normalized_mcp_allow_all_known_methods(left.endpoint)
+                != normalized_mcp_allow_all_known_methods(right.endpoint)
+            || left.binaries != right.binaries)
+    {
+        vec![
+            "one credential cannot have conflicting request policies for the same endpoint"
+                .to_string(),
+        ]
+    } else {
+        Vec::new()
     }
 }
 
@@ -388,12 +468,42 @@ fn is_json_rpc_family(protocol: &str) -> bool {
     protocol.eq_ignore_ascii_case("json-rpc") || protocol.eq_ignore_ascii_case("mcp")
 }
 
+fn normalized_mcp_allow_all_known_methods(endpoint: &NetworkEndpoint) -> bool {
+    endpoint
+        .mcp
+        .as_ref()
+        .and_then(|options| options.allow_all_known_mcp_methods)
+        .unwrap_or(false)
+}
+
 fn normalized_mcp_strict_tool_names(endpoint: &NetworkEndpoint) -> bool {
     endpoint
         .mcp
         .as_ref()
         .and_then(|options| options.strict_tool_names)
         .unwrap_or(true)
+}
+
+fn normalized_mcp_versions(endpoint: &NetworkEndpoint) -> Vec<String> {
+    let versions = endpoint
+        .mcp
+        .as_ref()
+        .map(|options| options.versions.as_slice())
+        .unwrap_or_default();
+    if versions.is_empty() {
+        vec![
+            openshell_core::mcp::DEFAULT_MCP_PROTOCOL_VERSION
+                .as_str()
+                .to_string(),
+        ]
+    } else {
+        versions
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 fn host_patterns_overlap(left: &str, right: &str) -> bool {
@@ -785,6 +895,107 @@ mod tests {
         right.access = NetworkAccessPreset::ReadWrite as i32;
 
         assert!(find_endpoint_ambiguities(&policy_with(left, right)).is_empty());
+    }
+
+    #[test]
+    fn account_bound_overlap_requires_exact_protected_credential_routes() {
+        let mut left = endpoint("mcp.example.com", 443);
+        left.path = "/mcp".into();
+        left.protocol = "mcp".into();
+        left.enforcement = NetworkEnforcementMode::EnforceCredentialBound as i32;
+        left.credential_binding = Some(openshell_core::proto::NetworkCredentialBinding {
+            provider: "account-a".into(),
+        });
+        let mut right = left.clone();
+        right.credential_binding.as_mut().unwrap().provider = "account-b".into();
+        assert!(find_endpoint_ambiguities(&policy_with(left.clone(), right.clone())).is_empty());
+        right.access = NetworkAccessPreset::ReadWrite as i32;
+        assert!(find_endpoint_ambiguities(&policy_with(left.clone(), right.clone())).is_empty());
+        right.credential_binding.as_mut().unwrap().provider = "account-a".into();
+        assert!(
+            find_endpoint_ambiguities(&policy_with(left.clone(), right.clone()))
+                .iter()
+                .any(|ambiguity| ambiguity
+                    .conflicts
+                    .iter()
+                    .any(|conflict| conflict.contains("one credential cannot have conflicting")))
+        );
+        right.access = left.access;
+        right.mcp = Some(openshell_core::proto::McpOptions {
+            allow_all_known_mcp_methods: Some(false),
+            ..Default::default()
+        });
+        assert!(find_endpoint_ambiguities(&policy_with(left.clone(), right.clone())).is_empty());
+        right.mcp.as_mut().unwrap().allow_all_known_mcp_methods = Some(true);
+        assert!(
+            find_endpoint_ambiguities(&policy_with(left.clone(), right.clone()))
+                .iter()
+                .any(|ambiguity| ambiguity
+                    .conflicts
+                    .iter()
+                    .any(|conflict| conflict.contains("one credential cannot have conflicting")))
+        );
+        right.credential_binding.as_mut().unwrap().provider = "account-b".into();
+        assert!(find_endpoint_ambiguities(&policy_with(left.clone(), right.clone())).is_empty());
+
+        right.path = "/**".into();
+        let partial = find_endpoint_ambiguities(&policy_with(left.clone(), right.clone()));
+        assert!(partial.iter().any(|ambiguity| {
+            ambiguity
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.contains("same exact host"))
+        }));
+
+        right.path = left.path.clone();
+        right.enforcement = NetworkEnforcementMode::Enforce as i32;
+        assert!(!find_endpoint_ambiguities(&policy_with(left.clone(), right.clone())).is_empty());
+
+        right.credential_binding = None;
+        right.provider_credentialed = true;
+        right.path = "/**".into();
+        let mut profile_policy = policy_with(left, right);
+        let profile_rule = profile_policy.network_policies.remove("right").unwrap();
+        profile_policy
+            .network_policies
+            .insert("_provider_third".into(), profile_rule);
+        assert!(!find_endpoint_ambiguities(&profile_policy).is_empty());
+    }
+
+    #[test]
+    fn ordinary_overlapping_routes_cannot_bypass_account_selection() {
+        let mut bound = endpoint("api.example.com", 443);
+        bound.path = "/api/**".into();
+        bound.protocol = "rest".into();
+        bound.enforcement = NetworkEnforcementMode::EnforceCredentialBound as i32;
+        bound.credential_binding = Some(openshell_core::proto::NetworkCredentialBinding {
+            provider: "account-a".into(),
+        });
+        let mut sibling = endpoint("api.example.com", 443);
+        sibling.path = "/api/admin".into();
+        sibling.protocol = "rest".into();
+        sibling.enforcement = NetworkEnforcementMode::Enforce as i32;
+        // Coverage markers do not make ordinary rules account-bound.
+        sibling.provider_credentialed = true;
+        for ordinary in [
+            sibling.clone(),
+            NetworkEndpoint {
+                protocol: String::new(),
+                path: "/other".into(),
+                ..sibling.clone()
+            },
+        ] {
+            assert!(
+                find_endpoint_ambiguities(&policy_with(bound.clone(), ordinary))
+                    .iter()
+                    .any(|ambiguity| ambiguity
+                        .conflicts
+                        .iter()
+                        .any(|conflict| conflict.contains("ordinary route cannot overlap")))
+            );
+        }
+        sibling.path = "/other".into();
+        assert!(find_endpoint_ambiguities(&policy_with(bound, sibling)).is_empty());
     }
 
     #[test]

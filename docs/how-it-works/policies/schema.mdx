@@ -160,7 +160,7 @@ the gateway host.
 |---|---|---|---|
 | `protocol` | string | None | `rest`, `websocket`, `graphql`, `mcp`, or `json-rpc` for request inspection, or `tcp` for a native TCP connection. `rest`, `graphql`, `mcp`, and `json-rpc` endpoints refuse requests that carry an `Upgrade` header with `403`. Refer to [Connection and Request Checks](/how-it-works/policies/network-rules#connection-and-request-checks). |
 | `tls` | string | Automatic | `skip` relays traffic without terminating TLS, so OpenShell cannot inspect it. Do not use it with a request protocol. |
-| `enforcement` | string | `audit` | `enforce` blocks requests that break the endpoint's rules. `audit` logs them and allows the request. |
+| `enforcement` | string | `audit` | `enforce` blocks requests that break the endpoint's rules. `enforce-credential-bound` also requires the selected credential's own rule to allow the request. `audit` logs violations and allows the request. |
 | `access` | string | None | Access preset: `read-only`, `read-write`, or `full`. Refer to [Access Presets](#access-presets). |
 | `rules` | list | None | Allow rules. |
 | `deny_rules` | list | None | Deny rules, which take precedence over allow rules. |
@@ -227,7 +227,12 @@ OpenShell rejects an endpoint that breaks these rules:
 - Endpoints whose hosts can match the same name on the same port, including
   through wildcards, must use the same `tls` and `allowed_ips` values.
   Inspected endpoints that can match the same request must also agree on
-  `protocol`, `enforcement`, and credential settings.
+  `protocol`, `enforcement`, and credential settings. Exact matching endpoints
+  can bind different providers when each uses `enforce-credential-bound` and
+  the providers have distinct credential environment keys. Such requests must
+  select exactly one authorized placeholder. Conflicting request policies for
+  the same provider and endpoint are rejected. See
+  [Independent Accounts on One Endpoint](/how-it-works/providers/profiles#independent-accounts-on-one-endpoint).
 
 Without `protocol`, `access` and `rules` have no effect.
 
@@ -357,7 +362,10 @@ matcher fields in one rule.
   Method globs and `mcp.allow_all_known_mcp_methods` do not. An extension
   method is one that no supported MCP revision defines.
 
-Under the 2025 revisions, a client sends `initialize` and `notifications/initialized` before calling tools. When `mcp.allow_all_known_mcp_methods` is omitted or `false`, allow both explicitly:
+Under the 2025 revisions, a client sends `initialize` and
+`notifications/initialized` before discovering tools with `tools/list` or
+calling them with `tools/call`. When `mcp.allow_all_known_mcp_methods` is
+omitted or `false`, allow each required method explicitly:
 
 ```yaml showLineNumbers={false}
 rules:
@@ -365,6 +373,8 @@ rules:
       method: initialize
   - allow:
       method: notifications/initialized
+  - allow:
+      method: tools/list
   - allow:
       method: tools/call
       tool:

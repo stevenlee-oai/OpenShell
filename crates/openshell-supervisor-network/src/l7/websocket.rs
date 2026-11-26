@@ -2691,6 +2691,8 @@ network_policies:
             HashMap::from([(
                 "DISCORD_BOT_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "gateway.example.test".to_string(),
                         port: 443,
@@ -2840,6 +2842,8 @@ network_policies:
             HashMap::from([(
                 "DISCORD_BOT_TOKEN".to_string(),
                 StaticCredentialBinding {
+                    request_policy_provider: String::new(),
+                    request_policy_owners: Vec::new(),
                     endpoints: vec![StaticCredentialEndpointBinding {
                         host: "gateway.example.test".into(),
                         port: 443,

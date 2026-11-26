@@ -36,6 +36,7 @@ pub fn network_enforcement_mode_from_str(value: &str) -> Option<NetworkEnforceme
     match value {
         "" => Some(NetworkEnforcementMode::Unspecified),
         "enforce" => Some(NetworkEnforcementMode::Enforce),
+        "enforce-credential-bound" => Some(NetworkEnforcementMode::EnforceCredentialBound),
         "audit" => Some(NetworkEnforcementMode::Audit),
         _ => None,
     }
@@ -45,6 +46,7 @@ pub fn network_enforcement_mode_to_str(value: i32) -> Option<&'static str> {
     match NetworkEnforcementMode::try_from(value).ok()? {
         NetworkEnforcementMode::Unspecified => Some(""),
         NetworkEnforcementMode::Enforce => Some("enforce"),
+        NetworkEnforcementMode::EnforceCredentialBound => Some("enforce-credential-bound"),
         NetworkEnforcementMode::Audit => Some("audit"),
     }
 }
@@ -193,9 +195,12 @@ pub fn validate_endpoint_modes(tls: &str, enforcement: &str, access: &str) -> Ve
     let mut errors = Vec::new();
 
     errors.extend(unknown_tls_value(tls));
-    if !matches!(enforcement, "" | "enforce" | "audit") {
+    if !matches!(
+        enforcement,
+        "" | "enforce" | "enforce-credential-bound" | "audit"
+    ) {
         errors.push(format!(
-            "unknown enforcement value '{enforcement}' (expected enforce or audit)"
+            "unknown enforcement value '{enforcement}' (expected enforce, enforce-credential-bound, or audit)"
         ));
     }
     if !matches!(access, "" | "read-only" | "read-write" | "full") {
@@ -400,7 +405,7 @@ mod tests {
     #[test]
     fn endpoint_modes_accept_documented_values_and_defaults() {
         for tls in ["", "skip"] {
-            for enforcement in ["", "enforce", "audit"] {
+            for enforcement in ["", "enforce", "enforce-credential-bound", "audit"] {
                 for access in ["", "read-only", "read-write", "full"] {
                     assert!(validate_endpoint_modes(tls, enforcement, access).is_empty());
                 }

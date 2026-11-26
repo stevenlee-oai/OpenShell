@@ -3062,6 +3062,8 @@ message GetSandboxProviderEnvironmentRequest {
   // metadata. Gateways withhold credentials that require this behavior when
   // the capability is absent.
   bool supports_stable_placeholder_environment_keys = 3;
+  // The supervisor can intersect static credential use with admitted request-policy owners.
+  bool supports_request_policy_bound_credentials = 4;
 }
 
 // One network endpoint at which a static provider credential may be resolved.
@@ -3084,6 +3086,10 @@ message StaticCredentialBinding {
   // sandbox, provider, credential key, endpoint authorization, or an applicable
   // refresh authorization epoch changes.
   string workload_credential_handle = 3;
+  // Gateway-issued endpoint policy owners permitted to authorize this credential.
+  repeated string request_policy_owners = 4;
+  // Concrete attached Provider whose endpoint rules may authorize these owners.
+  string request_policy_provider = 5;
 }
 
 // Polling projection of ProviderEnvironmentSnapshot. The parallel maps below

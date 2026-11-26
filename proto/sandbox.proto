@@ -156,6 +156,10 @@ enum NetworkEnforcementMode {
   NETWORK_ENFORCEMENT_MODE_ENFORCE = 1;
   // Log policy violations and allow the traffic.
   NETWORK_ENFORCEMENT_MODE_AUDIT = 2;
+  // Enforce request rules and require the selected static credential's own
+  // explicitly bound endpoint to admit the request. Older runtimes reject
+  // this value rather than dropping the credential-scoped authorization.
+  NETWORK_ENFORCEMENT_MODE_ENFORCE_CREDENTIAL_BOUND = 3;
 }
 
 // Shorthand access policy for an inspected network endpoint.

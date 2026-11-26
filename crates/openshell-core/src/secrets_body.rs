@@ -352,6 +352,8 @@ mod tests {
                 HashMap::from([(
                     "KEY".into(),
                     StaticCredentialBinding {
+                        request_policy_provider: String::new(),
+                        request_policy_owners: Vec::new(),
                         credential_identity: "provider".into(),
                         workload_credential_handle: handle,
                         endpoints: vec![StaticCredentialEndpointBinding {

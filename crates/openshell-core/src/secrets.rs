@@ -115,6 +115,7 @@ enum UnresolvedPlaceholderReason {
     Unavailable,
     EndpointMismatch,
     PlacementMismatch,
+    SelectionRequired,
 }
 
 pub const CREDENTIAL_PLACEMENT_MISMATCH: &str =
@@ -129,6 +130,11 @@ impl UnresolvedPlaceholderError {
     #[must_use]
     pub fn unavailable(location: &'static str) -> Self {
         unresolved(location)
+    }
+
+    #[must_use]
+    pub fn is_selection_required(&self) -> bool {
+        self.reason == UnresolvedPlaceholderReason::SelectionRequired
     }
 
     #[must_use]
@@ -148,6 +154,8 @@ impl fmt::Display for UnresolvedPlaceholderError {
                 UnresolvedPlaceholderReason::PlacementMismatch => CREDENTIAL_PLACEMENT_MISMATCH,
                 UnresolvedPlaceholderReason::EndpointMismatch =>
                     "credential is not authorized for the request endpoint",
+                UnresolvedPlaceholderReason::SelectionRequired =>
+                    "exactly one authorized account credential must be selected",
             },
             self.location,
         )
@@ -244,6 +252,14 @@ pub struct SecretResolver {
     revision_fallback_allowed_revisions: HashMap<String, Arc<HashSet<u64>>>,
     /// Where to report that this resolver handed out a real secret.
     use_record: Option<ResolverUseRecord>,
+    /// Request-local account selection, when required by an inspected route.
+    selection: Option<Arc<CredentialSelection>>,
+}
+
+#[derive(Debug)]
+struct CredentialSelection {
+    allowed: Arc<HashSet<String>>,
+    used: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Version that never matches a live credential version.
@@ -362,6 +378,59 @@ impl fmt::Debug for SecretResolver {
 }
 
 impl SecretResolver {
+    /// Mark a resolver as requiring one of the admitted account credentials.
+    #[must_use]
+    pub fn requiring_credential_selection(mut self, allowed: HashSet<String>) -> Self {
+        self.selection = Some(Arc::new(CredentialSelection {
+            allowed: Arc::new(allowed),
+            used: std::sync::Mutex::new(HashSet::new()),
+        }));
+        self
+    }
+
+    #[must_use]
+    pub fn requires_credential_selection(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    /// Start an independent account-selection record for this HTTP request.
+    #[must_use]
+    pub fn for_request_selection(&self) -> Self {
+        let mut scoped = self.clone();
+        scoped.selection = self.selection.as_ref().map(|selection| {
+            Arc::new(CredentialSelection {
+                allowed: Arc::clone(&selection.allowed),
+                used: std::sync::Mutex::new(HashSet::new()),
+            })
+        });
+        scoped
+    }
+
+    /// Clear the requirement after the forward proxy has already validated it.
+    #[must_use]
+    pub fn without_credential_selection(mut self) -> Self {
+        self.selection = None;
+        self
+    }
+
+    /// Reject before forwarding if the request did not select exactly one admitted account.
+    pub fn validate_credential_selection(&self) -> Result<(), UnresolvedPlaceholderError> {
+        if self.selection.as_ref().is_some_and(|selection| {
+            selection
+                .used
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+                != 1
+        }) {
+            return Err(UnresolvedPlaceholderError {
+                location: "request",
+                reason: UnresolvedPlaceholderReason::SelectionRequired,
+            });
+        }
+        Ok(())
+    }
+
     /// Report every real secret this resolver hands out to `marker`.
     ///
     /// `static_versions` is the version of each static credential in the
@@ -411,6 +480,16 @@ impl SecretResolver {
     /// value, records [`STALE_CREDENTIAL_VERSION`]; so does a placeholder with
     /// no recognisable key, under the placeholder itself.
     fn note_use(&self, placeholder: &str, served: &str) {
+        if let Some(selection) = &self.selection
+            && let Some(key) = placeholder_env_key(placeholder)
+            && selection.allowed.contains(key)
+        {
+            selection
+                .used
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key.to_owned());
+        }
         let Some(record) = &self.use_record else {
             return;
         };
@@ -521,6 +600,7 @@ impl SecretResolver {
                 identity_bound_env_keys: HashSet::new(),
                 revision_fallback_allowed_revisions: HashMap::new(),
                 use_record: None,
+                selection: None,
             })
         };
         (
@@ -580,6 +660,7 @@ impl SecretResolver {
                     identity_bound_env_keys: HashSet::new(),
                     revision_fallback_allowed_revisions: HashMap::new(),
                     use_record: None,
+                    selection: None,
                 }),
             )
         }
@@ -611,6 +692,7 @@ impl SecretResolver {
                 identity_bound_env_keys,
                 revision_fallback_allowed_revisions,
                 use_record: None,
+                selection: None,
             })
         }
     }
@@ -648,6 +730,7 @@ impl SecretResolver {
             identity_bound_env_keys: bound_keys.clone(),
             revision_fallback_allowed_revisions,
             use_record: self.use_record.clone(),
+            selection: self.selection.clone(),
         }
     }
 
@@ -773,6 +856,8 @@ impl SecretResolver {
             UnresolvedPlaceholderReason::EndpointMismatch
         } else if !self.placement_permits(placeholder) {
             UnresolvedPlaceholderReason::PlacementMismatch
+        } else if self.selection.is_some() {
+            UnresolvedPlaceholderReason::SelectionRequired
         } else {
             UnresolvedPlaceholderReason::Unavailable
         };
@@ -1635,7 +1720,10 @@ pub fn rewrite_http_header_block(
     raw: &[u8],
     resolver: Option<&SecretResolver>,
 ) -> Result<RewriteResult, UnresolvedPlaceholderError> {
-    let Some(resolver) = resolver else {
+    let request_resolver = resolver
+        .filter(|resolver| resolver.requires_credential_selection())
+        .map(SecretResolver::for_request_selection);
+    let Some(resolver) = request_resolver.as_ref().or(resolver) else {
         // Fail-closed: with no resolver there is nothing that can rewrite a
         // credential placeholder, so forwarding the block verbatim would leak
         // the reserved token to the upstream. Scan the header region (mirroring
@@ -1657,6 +1745,7 @@ pub fn rewrite_http_header_block(
     };
 
     let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4) else {
+        resolver.validate_credential_selection()?;
         return Ok(RewriteResult {
             rewritten: raw.to_vec(),
             redacted_target: None,
@@ -1666,6 +1755,7 @@ pub fn rewrite_http_header_block(
     let header_str = String::from_utf8_lossy(&raw[..header_end]);
     let mut lines = header_str.split("\r\n");
     let Some(request_line) = lines.next() else {
+        resolver.validate_credential_selection()?;
         return Ok(RewriteResult {
             rewritten: raw.to_vec(),
             redacted_target: None,
@@ -1698,6 +1788,7 @@ pub fn rewrite_http_header_block(
         return Err(unresolved("header"));
     }
 
+    resolver.validate_credential_selection()?;
     Ok(RewriteResult {
         rewritten: output,
         redacted_target: rl_result.redacted_target,
@@ -2414,6 +2505,47 @@ mod tests {
             .expect_err("unknown alias should fail closed");
 
         assert_eq!(err.location, "header");
+    }
+
+    #[test]
+    fn account_bound_header_rewrite_requires_exactly_one_admitted_credential_per_request() {
+        let (_, resolver) = SecretResolver::from_provider_env(HashMap::from([
+            ("ACCOUNT_A".into(), "token-a".into()),
+            ("ACCOUNT_B".into(), "token-b".into()),
+        ]));
+        let resolver = resolver
+            .unwrap()
+            .with_placements(HashMap::from([(
+                "ACCOUNT_B".into(),
+                CredentialPlacement::Header("x-account-b".into()),
+            )]))
+            .requiring_credential_selection(HashSet::from([
+                "ACCOUNT_A".into(),
+                "ACCOUNT_B".into(),
+            ]));
+        let selected =
+            b"POST /mcp HTTP/1.1\r\nAuthorization: Bearer openshell:resolve:env:ACCOUNT_A\r\n\r\n";
+        assert!(
+            String::from_utf8(
+                rewrite_http_header_block(selected, Some(&resolver))
+                    .unwrap()
+                    .rewritten
+            )
+            .unwrap()
+            .contains("Bearer token-a")
+        );
+        // The previous request must not make a later uncredentialed request look selected.
+        assert!(
+            rewrite_http_header_block(b"POST /mcp HTTP/1.1\r\n\r\n", Some(&resolver))
+                .unwrap_err()
+                .is_selection_required()
+        );
+        let ambiguous = b"POST /mcp HTTP/1.1\r\nAuthorization: Bearer openshell:resolve:env:ACCOUNT_A\r\nx-account-b: openshell:resolve:env:ACCOUNT_B\r\n\r\n";
+        assert!(
+            rewrite_http_header_block(ambiguous, Some(&resolver))
+                .unwrap_err()
+                .is_selection_required()
+        );
     }
 
     #[test]

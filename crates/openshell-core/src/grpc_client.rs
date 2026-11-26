@@ -1484,6 +1484,7 @@ pub async fn fetch_provider_environment_with_stable_placeholders(
 
     let response = client
         .get_sandbox_provider_environment(GetSandboxProviderEnvironmentRequest {
+            supports_request_policy_bound_credentials: true,
             sandbox_id: sandbox_id.to_string(),
             supports_static_credential_bindings: true,
             supports_stable_placeholder_environment_keys: true,

@@ -647,6 +647,7 @@ mod tests {
                     path: "/**".to_string(),
                     tls: crate::l7::TlsMode::Auto,
                     enforcement: crate::l7::EnforcementMode::Enforce,
+                    require_credential_selection: false,
                     graphql_max_body_bytes: crate::l7::graphql::DEFAULT_MAX_BODY_BYTES,
                     json_rpc_max_body_bytes: crate::l7::jsonrpc::DEFAULT_MAX_BODY_BYTES,
                     mcp_strict_tool_names: true,
@@ -2283,6 +2284,8 @@ network_policies:
                 (
                     key.to_string(),
                     openshell_core::proto::StaticCredentialBinding {
+                        request_policy_provider: String::new(),
+                        request_policy_owners: Vec::new(),
                         endpoints: vec![openshell_core::proto::StaticCredentialEndpointBinding {
                             host: "example.com".to_string(),
                             port: 80,

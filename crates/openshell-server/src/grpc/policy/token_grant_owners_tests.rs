@@ -288,3 +288,285 @@ async fn global_policy_replaces_grant_authorities_and_preserves_profile_destinat
             .all(|credential| !credential.token_grant_owners.contains(&previous_owner))
     );
 }
+
+#[tokio::test]
+async fn two_static_provider_bindings_activate_with_distinct_policy_owners() {
+    use crate::grpc::test_support::authed_request;
+    use openshell_core::proto::{NetworkCredentialBinding, NetworkPolicyRule, UpdateConfigRequest};
+
+    let state = test_server_state().await;
+    for (name, profile_id, key, token) in [
+        ("static-a", "static-a-profile", "ACCOUNT_A", "token-a"),
+        ("static-b", "static-b-profile", "ACCOUNT_B", "token-b"),
+    ] {
+        store_profile(
+            &state,
+            ProviderProfile {
+                id: profile_id.into(),
+                display_name: profile_id.into(),
+                credentials: vec![ProviderProfileCredential {
+                    name: key.into(),
+                    env_vars: vec![key.into()],
+                    auth_style: "bearer".into(),
+                    header_name: "Authorization".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut provider = tests::test_provider(name, profile_id);
+        provider.profile_workspace.clear();
+        provider.credentials = HashMap::from([(key.into(), token.into())]);
+        state.store.put_message(&provider).await.unwrap();
+    }
+    let mut sandbox = tests::test_sandbox(
+        "sb-static-accounts",
+        "static-accounts",
+        ProtoSandboxPolicy::default(),
+        vec!["static-a".into(), "static-b".into()],
+    );
+    sandbox.spec.as_mut().unwrap().policy = None;
+    state.store.put_message(&sandbox).await.unwrap();
+    let mut policy = ProtoSandboxPolicy {
+        version: 1,
+        filesystem: Some(openshell_core::proto::FilesystemPolicy {
+            include_workdir: true,
+            ..Default::default()
+        }),
+        process: Some(openshell_core::proto::ProcessPolicy {
+            run_as_user: "sandbox".into(),
+            run_as_group: "sandbox".into(),
+        }),
+        landlock: Some(openshell_core::proto::LandlockPolicy {
+            compatibility: "best_effort".into(),
+        }),
+        ..Default::default()
+    };
+    for (name, tools) in [
+        ("static-a", vec!["search"]),
+        ("static-b", vec!["search", "send"]),
+    ] {
+        policy.network_policies.insert(
+            name.into(),
+            NetworkPolicyRule {
+                name: name.into(),
+                binaries: vec![NetworkBinary {
+                    path: "/usr/bin/curl".into(),
+                }],
+                endpoints: vec![NetworkEndpoint {
+                    host: "api.example.test".into(),
+                    port: 8080,
+                    path: "/mcp".into(),
+                    protocol: "mcp".into(),
+                    enforcement: NetworkEnforcementMode::EnforceCredentialBound.into(),
+                    mcp: Some(openshell_core::proto::McpOptions {
+                        versions: vec!["2025-11-25".into()],
+                        ..Default::default()
+                    }),
+                    rules: vec![openshell_core::proto::L7Rule {
+                        allow: Some(openshell_core::proto::L7Allow {
+                            method: "tools/call".into(),
+                            params: HashMap::from([(
+                                "name".into(),
+                                openshell_core::proto::L7QueryMatcher {
+                                    any: tools.into_iter().map(str::to_string).collect(),
+                                    ..Default::default()
+                                },
+                            )]),
+                            ..Default::default()
+                        }),
+                    }],
+                    credential_binding: Some(NetworkCredentialBinding {
+                        provider: name.into(),
+                    }),
+                    ..Default::default()
+                }],
+            },
+        );
+    }
+    // A single account cannot gain the union of two conflicting policies on the same route.
+    let mut conflicting = policy.clone();
+    let mut same_account = conflicting.network_policies["static-a"].clone();
+    same_account.name = "static-a-expanded".into();
+    same_account.endpoints[0].rules = conflicting.network_policies["static-b"].endpoints[0]
+        .rules
+        .clone();
+    conflicting
+        .network_policies
+        .insert(same_account.name.clone(), same_account);
+    let err = handle_update_config(
+        &state,
+        authed_request(UpdateConfigRequest {
+            sandbox: "static-accounts".into(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            policy: Some(conflicting),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.message()
+            .contains("one credential cannot have conflicting request policies")
+    );
+
+    handle_update_config(
+        &state,
+        authed_request(UpdateConfigRequest {
+            sandbox: "static-accounts".into(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            policy: Some(policy),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("activate two accounts without ambiguous provider selection");
+    let config = load_sandbox_config(&state, &sandbox).await.unwrap();
+    let policy = config.policy.unwrap();
+    let snapshot = build_provider_environment_snapshot(&state, &sandbox, true, true)
+        .await
+        .unwrap();
+    for (key, provider) in [("ACCOUNT_A", "static-a"), ("ACCOUNT_B", "static-b")] {
+        let endpoint = &policy.network_policies[provider].endpoints[0];
+        assert!(!endpoint.token_grant_owner.is_empty());
+        let value = snapshot
+            .values
+            .iter()
+            .find(|value| value.name == key)
+            .unwrap();
+        assert_eq!(
+            value
+                .static_credential_binding
+                .as_ref()
+                .unwrap()
+                .request_policy_owners,
+            vec![endpoint.token_grant_owner.clone()]
+        );
+    }
+    assert_ne!(
+        policy.network_policies["static-a"].endpoints[0].token_grant_owner,
+        policy.network_policies["static-b"].endpoints[0].token_grant_owner
+    );
+    for supported in [false, true] {
+        let polled = handle_get_sandbox_provider_environment(
+            &state,
+            authed_request(
+                openshell_core::proto::GetSandboxProviderEnvironmentRequest {
+                    sandbox_id: "sb-static-accounts".into(),
+                    supports_static_credential_bindings: true,
+                    supports_stable_placeholder_environment_keys: true,
+                    supports_request_policy_bound_credentials: supported,
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            polled.environment.contains_key("ACCOUNT_A"),
+            supported,
+            "startup polling must refuse an old supervisor and deliver to a capable one"
+        );
+    }
+    assert!(
+        require_policy_capabilities(Vec::new(), Some(&policy)).is_err(),
+        "old pushed supervisor must be rejected"
+    );
+    assert!(
+        require_policy_capabilities(
+            vec![
+                openshell_core::extension_protocol::POLICY_REQUEST_BOUND_CREDENTIALS_V1.to_string()
+            ],
+            Some(&policy)
+        )
+        .is_ok()
+    );
+    let environment =
+        openshell_core::grpc_client::ProviderEnvironmentResult::try_from(snapshot.clone()).unwrap();
+    openshell_core::provider_credentials::validate_request_bound_credential_snapshot(
+        &policy,
+        &environment.static_credential_bindings,
+    )
+    .unwrap();
+    let mut swapped = environment.static_credential_bindings.clone();
+    let b_owners = swapped["ACCOUNT_B"].request_policy_owners.clone();
+    swapped.get_mut("ACCOUNT_A").unwrap().request_policy_owners = b_owners;
+    assert!(
+        openshell_core::provider_credentials::validate_request_bound_credential_snapshot(
+            &policy, &swapped
+        )
+        .is_err(),
+        "account A cannot use account B's owners"
+    );
+    let mut stripped = environment.static_credential_bindings.clone();
+    stripped
+        .get_mut("ACCOUNT_A")
+        .unwrap()
+        .request_policy_owners
+        .clear();
+    assert!(
+        openshell_core::provider_credentials::validate_request_bound_credential_snapshot(
+            &policy, &stripped
+        )
+        .is_err(),
+        "stripped metadata must not activate"
+    );
+    // Previously admitted state can contain an expired provider sharing A's key. Refuse
+    // the whole snapshot before either credential can inherit the other's policy owner.
+    let original_b = state
+        .store
+        .get_message_by_name::<openshell_core::proto::Provider>("default", "static-b")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut expired_b = original_b.clone();
+    expired_b.r#type = "static-a-profile".into();
+    expired_b.credentials = HashMap::from([("ACCOUNT_A".into(), "expired-token-b".into())]);
+    expired_b.credential_expiration_times = HashMap::from([(
+        "ACCOUNT_A".into(),
+        openshell_core::time::timestamp_from_millis(1).unwrap(),
+    )]);
+    state.store.put_message(&expired_b).await.unwrap();
+    let collision = build_provider_environment_snapshot(&state, &sandbox, true, true)
+        .await
+        .unwrap_err();
+    assert_eq!(collision.code(), tonic::Code::FailedPrecondition);
+    assert!(collision.message().contains("ACCOUNT_A"));
+    assert!(collision.message().contains("static-a"));
+    assert!(collision.message().contains("static-b"));
+    state.store.put_message(&original_b).await.unwrap();
+
+    let mut remaining = policy.clone();
+    remaining
+        .network_policies
+        .retain(|name, _| !openshell_policy::is_provider_rule_name(name));
+    remaining.network_policies.remove("static-b");
+    handle_update_config(
+        &state,
+        authed_request(UpdateConfigRequest {
+            sandbox: "static-accounts".into(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            policy: Some(remaining),
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("withdraw account B");
+    let remaining_snapshot = build_provider_environment_snapshot(&state, &sandbox, true, true)
+        .await
+        .unwrap();
+    let a = remaining_snapshot
+        .values
+        .iter()
+        .find(|value| value.name == "ACCOUNT_A")
+        .unwrap();
+    assert!(
+        !a.static_credential_binding
+            .as_ref()
+            .unwrap()
+            .request_policy_owners
+            .is_empty(),
+        "remaining account stays restricted after withdrawal"
+    );
+}

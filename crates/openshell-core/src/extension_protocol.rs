@@ -12,6 +12,10 @@ use crate::proto::extension::v1::{PeerMetadata, ProtocolVersion};
 pub const PROTOCOL_MAJOR: u32 = 1;
 pub const PROTOCOL_MINOR: u32 = 0;
 
+/// A peer can enforce request-policy ownership for static credential bindings.
+pub const POLICY_REQUEST_BOUND_CREDENTIALS_V1: &str =
+    "openshell.policy.request-bound-credentials.v1";
+
 /// Policy format implemented by a peer's registered Cedar backend.
 pub const POLICY_CEDAR_V1: &str = "openshell.policy.cedar.v1";
 

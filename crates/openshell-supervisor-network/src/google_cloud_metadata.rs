@@ -376,6 +376,8 @@ mod tests {
 
     fn token_binding() -> openshell_core::proto::StaticCredentialBinding {
         openshell_core::proto::StaticCredentialBinding {
+            request_policy_provider: String::new(),
+            request_policy_owners: Vec::new(),
             endpoints: vec![openshell_core::proto::StaticCredentialEndpointBinding {
                 host: "storage.googleapis.com".into(),
                 port: 443,
